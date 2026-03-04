@@ -1,0 +1,17 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Cover images: only authenticated users can read/write within their own org path.
+    match /covers/{orgId}/{templateId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null;
+    }
+
+    // Deny everything else.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

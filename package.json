@@ -1,0 +1,51 @@
+{
+  "name": "figma-page-templates",
+  "dependencies": {
+    "@create-figma-plugin/ui": "^4.0.3",
+    "@create-figma-plugin/utilities": "^4.0.3",
+    "firebase": "^11.0.0",
+    "preact": ">=10"
+  },
+  "devDependencies": {
+    "@create-figma-plugin/build": "^4.0.3",
+    "@create-figma-plugin/tsconfig": "^4.0.3",
+    "@figma/plugin-typings": "1.109.0",
+    "@firebase/rules-unit-testing": "^4.0.1",
+    "@types/node": "^22.0.0",
+    "dotenv-cli": "^11.0.0",
+    "firebase-admin": "^13.7.0",
+    "typescript": ">=5",
+    "vite": "^7.3.1",
+    "vitest": "^4.0.18"
+  },
+  "scripts": {
+    "build": "dotenv -- build-figma-plugin --typecheck --minify",
+    "watch": "dotenv -- build-figma-plugin --typecheck --watch",
+    "dev": "dotenv -- build-figma-plugin --typecheck --watch",
+    "test": "vitest run tests/",
+    "test:watch": "vitest tests/"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@firebase/util",
+      "esbuild",
+      "protobufjs"
+    ]
+  },
+  "figma-plugin": {
+    "editorType": [
+      "figma"
+    ],
+    "id": "",
+    "name": "Page Templates",
+    "main": "src/plugin/code.ts",
+    "ui": "src/ui/App.tsx",
+    "networkAccess": {
+      "allowedDomains": [
+        "https://api.figma.com",
+        "*"
+      ],
+      "reasoning": "Communicate with external APIs and load external assets."
+    }
+  }
+}

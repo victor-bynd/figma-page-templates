@@ -1,0 +1,18 @@
+{
+  "extends": "@create-figma-plugin/tsconfig",
+  "compilerOptions": {
+    "moduleResolution": "Bundler",
+    "lib": ["DOM", "ES2020", "ES2022"],
+    "paths": {
+      "react": ["./node_modules/preact/compat"],
+      "react-dom": ["./node_modules/preact/compat"],
+      "@shared/*": ["./src/shared/*"],
+      "@plugin/*": ["./src/plugin/*"],
+      "@ui/*": ["./src/ui/*"],
+      "@backend/*": ["./src/firebase/*"]
+    },
+    "skipLibCheck": true,
+    "typeRoots": ["node_modules/@figma", "node_modules/@types"]
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx"]
+}
