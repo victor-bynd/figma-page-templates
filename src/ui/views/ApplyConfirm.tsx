@@ -2,7 +2,7 @@ import { h } from 'preact'
 import { useEffect, useState } from 'preact/hooks'
 import { sendMessage } from '../App'
 import type { TemplatePage, Template } from '@shared/types'
-import { findFirstNamedCoverPageIndex } from '@shared/coverPage'
+import { resolveCoverPageIndex } from '@shared/coverPage'
 
 export type ApplyStatus = 'idle' | 'applying' | 'success' | 'error'
 
@@ -71,7 +71,10 @@ export function ApplyConfirm({
   onBack,
   onSetupCover
 }: ApplyConfirmProps) {
-  const defaultCoverPageIndex = findFirstNamedCoverPageIndex(template.pages)
+  const defaultCoverPageIndex = resolveCoverPageIndex(
+    template.pages,
+    template.coverPageIndex
+  )
   const hasTemplateCover = defaultCoverPageIndex !== null
 
   const [pageStates, setPageStates] = useState<PageState[]>(() =>
@@ -103,9 +106,11 @@ export function ApplyConfirm({
 
   useEffect(() => {
     setPageStates(template.pages.map(p => ({ name: p.name, enabled: true })))
-    setSelectedCoverIndex(findFirstNamedCoverPageIndex(template.pages))
+    setSelectedCoverIndex(
+      resolveCoverPageIndex(template.pages, template.coverPageIndex)
+    )
     setReplaceAll(true)
-  }, [template.id, template.pages])
+  }, [template.id, template.pages, template.coverPageIndex])
 
   function updatePageName(index: number, name: string) {
     setPageStates(prev => prev.map((s, i) => (i === index ? { ...s, name } : s)))

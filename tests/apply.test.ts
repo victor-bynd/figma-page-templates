@@ -126,6 +126,21 @@ describe('applyTemplate', () => {
         expect(createdPages[1].name).toBe('Page 2')
     })
 
+    it('does not skip alias pages when a different coverPageName is selected', () => {
+        const pages: TemplatePage[] = [
+            { name: 'Cover', sections: [] },
+            { name: 'Intro', sections: [] },
+            { name: 'Page 2', sections: [] }
+        ]
+
+        applyTemplate(pages, { includeCover: true, coverPageName: 'Intro' })
+
+        expect(global.figma.createPage).toHaveBeenCalledTimes(3)
+        expect(createdPages.filter(p => p.name === 'Intro')).toHaveLength(1)
+        expect(createdPages.map(p => p.name)).toContain('Cover')
+        expect(createdPages.map(p => p.name)).toContain('Page 2')
+    })
+
     it('handles empty template silently', () => {
         applyTemplate([])
         expect(global.figma.createPage).toHaveBeenCalledTimes(0)

@@ -174,8 +174,8 @@ function isTemplateCoverPage(
   const normalizedPageName = templatePageName.trim().toLowerCase()
   const normalizedConfigured = configuredCoverPageName?.trim().toLowerCase()
 
-  if (normalizedConfigured && normalizedPageName === normalizedConfigured) {
-    return true
+  if (normalizedConfigured) {
+    return normalizedPageName === normalizedConfigured
   }
 
   return isCoverPageName(templatePageName)

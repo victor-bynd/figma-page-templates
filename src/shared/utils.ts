@@ -61,7 +61,24 @@ export type AccountExport = {
  * Strips environment-specific fields and any sensitive data.
  */
 export function serializeTemplate(template: Template): string {
-  return JSON.stringify(serializeTemplatePayload(template), null, 2)
+  const payload = serializeTemplatePayload(template)
+  if (!payload.coverConfig) {
+    return JSON.stringify(payload, null, 2)
+  }
+
+  return JSON.stringify(
+    {
+      ...payload,
+      coverConfig: {
+        ...payload.coverConfig,
+        library: {
+          fileKey: payload.coverConfig.library.fileKey
+        }
+      }
+    },
+    null,
+    2
+  )
 }
 
 /**
@@ -245,7 +262,9 @@ export function validateAccountJSON(json: unknown): {
   return { templates: [single], groups: [] }
 }
 
-function serializeTemplatePayload(template: Template): ExportedTemplate {
+function serializeTemplatePayload(
+  template: Template
+): ExportedTemplate {
   const {
     // strip fields that should not be exported
     id: _id,
