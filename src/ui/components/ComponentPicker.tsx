@@ -6,9 +6,11 @@ interface ComponentPickerProps {
     components: FigmaComponent[]
     loading: boolean
     onSelect: (componentKey: string) => void
+    /** Override the max-height of the component grid. Default: '260px'. */
+    gridMaxHeight?: string
 }
 
-export function ComponentPicker({ components, loading, onSelect }: ComponentPickerProps) {
+export function ComponentPicker({ components, loading, onSelect, gridMaxHeight = '260px' }: ComponentPickerProps) {
     const [search, setSearch] = useState('')
     const [selectedKey, setSelectedKey] = useState<string | null>(null)
 
@@ -48,7 +50,7 @@ export function ComponentPicker({ components, loading, onSelect }: ComponentPick
                     <p style={styles.emptyText}>No components match your search.</p>
                 </div>
             ) : (
-                <div style={styles.grid}>
+                <div style={{ ...styles.grid, maxHeight: gridMaxHeight }}>
                     {filtered.map(c => (
                         <button
                             key={c.key}
@@ -111,7 +113,7 @@ const styles: Record<string, h.JSX.CSSProperties> = {
     },
     grid: {
         display: 'grid',
-        gridTemplateColumns: 'repeat(3, 1fr)',
+        gridTemplateColumns: 'repeat(auto-fill, minmax(80px, 1fr))',
         gap: '8px',
         maxHeight: '260px',
         overflowY: 'auto'

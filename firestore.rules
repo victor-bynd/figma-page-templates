@@ -5,13 +5,10 @@ service cloud.firestore {
 
     // -----------------------------------------------------------------------
     // Helper: verify the requesting user belongs to the given org.
-    // We look up the user's own document (written on sign-in) to get orgId.
+    // Reads orgId from the custom claim set by the Cloud Function.
     // -----------------------------------------------------------------------
     function belongsToOrg(orgId) {
-      let userDoc = get(/databases/$(database)/documents/users/$(request.auth.uid));
-      return request.auth != null
-          && userDoc != null
-          && userDoc.data.orgId == orgId;
+      return request.auth != null && request.auth.token.orgId == orgId;
     }
 
     // -----------------------------------------------------------------------
@@ -42,11 +39,35 @@ service cloud.firestore {
     }
 
     // -----------------------------------------------------------------------
+    // Groups — orgs/{orgId}/groups/{groupId}
+    // -----------------------------------------------------------------------
+    match /orgs/{orgId}/groups/{groupId} {
+      // Any member of the org can read groups.
+      allow read: if belongsToOrg(orgId);
+
+      // Any member can create a group.
+      allow create: if belongsToOrg(orgId)
+                    && request.resource.data.createdBy == request.auth.uid;
+
+      // Any member can update (e.g. rename, reorder).
+      allow update: if belongsToOrg(orgId)
+                    && request.resource.data.createdBy == resource.data.createdBy;
+
+      // Any member can delete a group.
+      allow delete: if belongsToOrg(orgId);
+    }
+
+    // -----------------------------------------------------------------------
     // User documents — users/{userId}
+    // Only the user can read/write their own doc, and orgId is forbidden
+    // in client writes (it's set server-side via custom claims).
     // -----------------------------------------------------------------------
     match /users/{userId} {
-      // Users can only read and write their own document.
-      allow read, write: if request.auth != null && request.auth.uid == userId;
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow create: if request.auth != null && request.auth.uid == userId
+                    && !('orgId' in request.resource.data);
+      allow update: if request.auth != null && request.auth.uid == userId
+                    && !('orgId' in request.resource.data);
     }
 
     // -----------------------------------------------------------------------

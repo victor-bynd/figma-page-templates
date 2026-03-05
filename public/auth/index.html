@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Page Templates - Sign In</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+        background: #f6f7fb;
+      }
+      body {
+        margin: 0;
+        padding: 32px 16px;
+        display: flex;
+        justify-content: center;
+        color: #111827;
+      }
+      main {
+        width: min(520px, 100%);
+        background: #ffffff;
+        border-radius: 16px;
+        padding: 28px;
+        box-shadow: 0 18px 40px rgba(15, 23, 42, 0.12);
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+      h1 {
+        margin: 0;
+        font-size: 20px;
+      }
+      p {
+        margin: 0;
+        color: #4b5563;
+        font-size: 14px;
+        line-height: 1.5;
+      }
+      button {
+        border: none;
+        border-radius: 10px;
+        padding: 12px 16px;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .primary {
+        background: #2563eb;
+        color: #ffffff;
+      }
+      .secondary {
+        background: #e5e7eb;
+        color: #111827;
+      }
+      .status {
+        padding: 10px 12px;
+        background: #f3f4f6;
+        border-radius: 8px;
+        font-size: 13px;
+        color: #374151;
+      }
+      .muted {
+        color: #6b7280;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Sign in to Page Templates</h1>
+      <p>Click the button to sign in with Google. When you finish, return to the plugin and it will continue automatically.</p>
+
+      <button class="primary" id="signInButton">Sign in with Google</button>
+      <div class="status" id="status">Waiting to start sign-in.</div>
+
+      <button class="secondary" id="restartButton">Start over</button>
+
+      <p class="muted">You can close this window after the plugin confirms you are signed in.</p>
+    </main>
+
+    <script src="https://www.gstatic.com/firebasejs/11.10.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/11.10.0/firebase-auth-compat.js"></script>
+    <script src="/__/firebase/init.js"></script>
+    <script>
+      const statusEl = document.getElementById('status');
+      const signInButton = document.getElementById('signInButton');
+      const restartButton = document.getElementById('restartButton');
+
+      const query = new URLSearchParams(window.location.search);
+      const state = query.get('state') || '';
+
+      const auth = firebase.auth();
+      const provider = new firebase.auth.GoogleAuthProvider();
+      provider.addScope('email');
+      provider.addScope('profile');
+
+      const REGION = 'us-central1';
+
+      function setStatus(message, isError) {
+        statusEl.textContent = message;
+        statusEl.style.background = isError ? '#fee2e2' : '#f3f4f6';
+        statusEl.style.color = isError ? '#991b1b' : '#374151';
+      }
+
+      function getFunctionsOrigin() {
+        const projectId = firebase.app().options.projectId;
+        if (!projectId) return '';
+        if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+          return `http://localhost:5001/${projectId}/${REGION}`;
+        }
+        return `https://${REGION}-${projectId}.cloudfunctions.net`;
+      }
+
+      async function createBridge(idToken) {
+        if (!state) throw new Error('Missing sign-in state. Re-open this page from the plugin.');
+        const origin = getFunctionsOrigin();
+        if (!origin) throw new Error('Missing Firebase project configuration.');
+        const response = await fetch(`${origin}/createAuthBridge`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idToken, state })
+        });
+        if (!response.ok) {
+          throw new Error(`Bridge request failed (${response.status}).`);
+        }
+      }
+
+      async function finish(result) {
+        if (!result || !result.user) return;
+        const idToken = await result.user.getIdToken(true);
+        await createBridge(idToken);
+        setStatus('Sign-in complete. Return to the plugin to finish.', false);
+      }
+
+      async function startSignIn() {
+        setStatus('Opening Google sign-in...', false);
+        try {
+          const result = await auth.signInWithPopup(provider);
+          await finish(result);
+        } catch (err) {
+          const code = err && err.code ? err.code : '';
+          if (code === 'auth/popup-blocked' || code === 'auth/popup-closed-by-user') {
+            await auth.signInWithRedirect(provider);
+            return;
+          }
+          setStatus(`Sign-in failed: ${err.message || 'Unknown error'}`, true);
+        }
+      }
+
+      async function checkRedirect() {
+        try {
+          const result = await auth.getRedirectResult();
+          if (result && result.user) {
+            await finish(result);
+          }
+        } catch (err) {
+          setStatus(`Sign-in failed: ${err.message || 'Unknown error'}`, true);
+        }
+      }
+
+      signInButton.addEventListener('click', startSignIn);
+      restartButton.addEventListener('click', () => {
+        setStatus('Waiting to start sign-in.', false);
+      });
+
+      checkRedirect();
+    </script>
+  </body>
+</html>

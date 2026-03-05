@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'preact/hooks'
+import { useCallback, useEffect, useState } from 'preact/hooks'
 import { collection, onSnapshot, orderBy, query, Timestamp } from 'firebase/firestore'
 import { getDb } from '@backend/db'
+import { sendMessage } from '../App'
 import type { Template } from '@shared/types'
 
 const cacheKey = (orgId: string) => `templates_cache_${orgId}`
@@ -27,12 +28,42 @@ function writeCache(orgId: string, templates: Template[]): void {
   }
 }
 
-export function useTemplates(orgId: string) {
-  const [templates, setTemplates] = useState<Template[]>(() => readCache(orgId))
+export function useTemplates(mode: 'firestore' | 'local', orgId: string) {
+  const [templates, setTemplates] = useState<Template[]>(() =>
+    mode === 'local' ? [] : readCache(orgId)
+  )
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
+  const refresh = useCallback(() => {
+    sendMessage({ type: 'GET_LOCAL_TEMPLATES' })
+  }, [])
+
   useEffect(() => {
+    if (mode === 'local') {
+      setLoading(true)
+      sendMessage({ type: 'GET_LOCAL_TEMPLATES' })
+
+      const handleMessage = (event: MessageEvent) => {
+        const msg = event.data?.pluginMessage
+        if (!msg || msg.type !== 'LOCAL_TEMPLATES_RESULT') return
+        setTemplates(msg.templates)
+        setLoading(false)
+        setError(null)
+      }
+
+      window.addEventListener('message', handleMessage)
+      return () => window.removeEventListener('message', handleMessage)
+    }
+
+    if (!orgId) {
+      // Avoid invalid Firestore paths while auth/org is still loading.
+      setLoading(true)
+      setError(null)
+      return
+    }
+
+    // Firestore mode
     const db = getDb()
     const q = query(
       collection(db, 'orgs', orgId, 'templates'),
@@ -69,7 +100,7 @@ export function useTemplates(orgId: string) {
     )
 
     return () => unsubscribe()
-  }, [orgId])
+  }, [mode, orgId])
 
-  return { templates, loading, error }
+  return { templates, loading, error, refresh }
 }

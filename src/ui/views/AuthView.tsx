@@ -1,39 +1,154 @@
 import { h } from 'preact'
-import { useState } from 'preact/hooks'
-import { cacheTokenLocal, signInWithGoogle } from '@backend/auth'
+import { useEffect, useRef, useState } from 'preact/hooks'
+import { auth, cacheTokenLocal, getOrgIdFromClaims, getFunctionsOrigin, signInWithCustomToken } from '@backend/auth'
+import { firebaseConfig } from '@backend/config'
 import { bootstrapOrg, upsertUser } from '@backend/db'
 import { sendMessage } from '../App'
 import type { OrgUser } from '@shared/types'
 
 interface AuthViewProps {
   onSignedIn: (user: OrgUser) => void
+  onSkipSignIn: () => void
 }
 
-export function AuthView({ onSignedIn }: AuthViewProps) {
+export function AuthView({ onSignedIn, onSkipSignIn }: AuthViewProps) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [bridgeState, setBridgeState] = useState<'idle' | 'awaiting-code' | 'verifying'>('idle')
+  const pollTimerRef = useRef<number | null>(null)
+  const pollStartedAtRef = useRef<number | null>(null)
+  const activeStateRef = useRef<string | null>(null)
 
-  async function handleSignIn() {
+  const authBridgeUrl = getAuthBridgeUrl()
+  const functionsOrigin = getFunctionsOrigin()
+
+  const BRIDGE_POLL_INTERVAL_MS = 1500
+  const BRIDGE_POLL_TIMEOUT_MS = 2 * 60 * 1000
+
+  function stopPolling() {
+    if (pollTimerRef.current !== null) {
+      window.clearTimeout(pollTimerRef.current)
+      pollTimerRef.current = null
+    }
+    pollStartedAtRef.current = null
+    activeStateRef.current = null
+  }
+
+  useEffect(() => {
+    return () => {
+      stopPolling()
+    }
+  }, [])
+
+  async function consumeBridgeToken(state: string): Promise<string | null> {
+    if (!functionsOrigin) {
+      throw new Error('Functions origin is not configured. Set VITE_FIREBASE_FUNCTIONS_ORIGIN or VITE_FIREBASE_PROJECT_ID.')
+    }
+
+    const response = await fetch(`${functionsOrigin}/consumeAuthBridge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state })
+    })
+
+    if (response.status === 404) return null
+    if (response.status === 410) {
+      throw new Error('Sign-in expired. Open the browser window again to restart.')
+    }
+    if (!response.ok) {
+      throw new Error('Sign-in could not be completed. Try again.')
+    }
+
+    const data = (await response.json()) as { customToken?: string }
+    if (!data.customToken) {
+      throw new Error('Missing sign-in token. Try again.')
+    }
+
+    return data.customToken
+  }
+
+  async function completeBridgeSignIn(customToken: string) {
     setLoading(true)
     setError(null)
+    setBridgeState('verifying')
     try {
-      const user = await signInWithGoogle()
-      // Ensure user doc exists before org creation (rules depend on user doc).
+      const user = await signInWithCustomToken(customToken)
+      // Read orgId from the custom claim set by createAuthBridge
+      const orgId = await getOrgIdFromClaims(auth.currentUser!)
+      user.orgId = orgId
       await upsertUser(user)
       await bootstrapOrg(user.orgId, user.email.split('@')[1] ?? '')
-      // Cache the fresh token in the plugin main thread
-      const { auth } = await import('@backend/auth')
       const cachedAt = Date.now()
       const token = await auth.currentUser!.getIdToken()
       cacheTokenLocal(token, cachedAt)
       sendMessage({ type: 'CACHE_AUTH_TOKEN', token, cachedAt })
+      setBridgeState('idle')
       onSignedIn(user)
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Sign-in failed'
-      setError(msg === 'REDIRECT_INITIATED' ? null : msg)
+      setError(msg)
+      setBridgeState('awaiting-code')
     } finally {
       setLoading(false)
     }
+  }
+
+  async function pollForBridge(state: string) {
+    if (activeStateRef.current !== state) return
+    try {
+      const customToken = await consumeBridgeToken(state)
+      if (customToken) {
+        stopPolling()
+        await completeBridgeSignIn(customToken)
+        return
+      }
+    } catch (err) {
+      stopPolling()
+      const msg = err instanceof Error ? err.message : 'Sign-in failed'
+      setError(msg)
+      setBridgeState('awaiting-code')
+      return
+    }
+
+    const startedAt = pollStartedAtRef.current ?? Date.now()
+    pollStartedAtRef.current = startedAt
+    if (Date.now() - startedAt > BRIDGE_POLL_TIMEOUT_MS) {
+      stopPolling()
+      setError('Sign-in timed out. Open the browser window again to restart.')
+      setBridgeState('awaiting-code')
+      return
+    }
+
+    pollTimerRef.current = window.setTimeout(() => {
+      void pollForBridge(state)
+    }, BRIDGE_POLL_INTERVAL_MS)
+  }
+
+  function handleOpenBrowserSignIn() {
+    setError(null)
+    stopPolling()
+    const state = generateAuthState()
+    const url = buildAuthBridgeUrl(authBridgeUrl, state)
+    if (!url) {
+      setError('Auth bridge URL is not configured. Set VITE_FIREBASE_AUTH_BRIDGE_URL or deploy the /auth page on Firebase Hosting.')
+      return
+    }
+    if (!functionsOrigin) {
+      setError('Functions origin is not configured. Set VITE_FIREBASE_FUNCTIONS_ORIGIN or VITE_FIREBASE_PROJECT_ID.')
+      return
+    }
+    sendMessage({ type: 'OPEN_EXTERNAL_URL', url })
+    setBridgeState('awaiting-code')
+    activeStateRef.current = state
+    pollStartedAtRef.current = Date.now()
+    void pollForBridge(state)
+  }
+
+  function handleCancelBridgeSignIn() {
+    stopPolling()
+    setBridgeState('idle')
+    setError(null)
+    setLoading(false)
   }
 
   return (
@@ -58,7 +173,7 @@ export function AuthView({ onSignedIn }: AuthViewProps) {
 
       <button
         style={{ ...styles.button, ...(loading ? styles.buttonDisabled : {}) }}
-        onClick={handleSignIn}
+        onClick={handleOpenBrowserSignIn}
         disabled={loading}
       >
         {loading ? (
@@ -70,8 +185,73 @@ export function AuthView({ onSignedIn }: AuthViewProps) {
           </span>
         )}
       </button>
+
+      {bridgeState !== 'idle' && (
+        <div style={styles.bridgePanel}>
+          <p style={styles.bridgeText}>
+            A browser window has opened for Google sign-in. After you finish, return here and
+            the plugin will continue automatically.
+          </p>
+          <p style={styles.bridgeStatus}>
+            {bridgeState === 'verifying' ? 'Verifying sign-in…' : 'Waiting for confirmation…'}
+          </p>
+          <button
+            style={styles.secondaryButton}
+            onClick={handleOpenBrowserSignIn}
+            disabled={loading}
+          >
+            Open browser again
+          </button>
+          <button
+            style={styles.secondaryButton}
+            onClick={handleCancelBridgeSignIn}
+            disabled={loading}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
+      <button
+        style={styles.skipButton}
+        onClick={onSkipSignIn}
+        disabled={loading}
+      >
+        Use Locally (Skip Sign-in)
+      </button>
     </div>
   )
+}
+
+function getAuthBridgeUrl(): string {
+  const env = (import.meta as { env?: Record<string, string> }).env ?? {}
+  const fromEnv = env.VITE_FIREBASE_AUTH_BRIDGE_URL
+  if (fromEnv) return fromEnv
+  const authDomainFromApp = auth?.app?.options?.authDomain
+  if (authDomainFromApp) return `https://${authDomainFromApp}/auth`
+  const authDomain = env.VITE_FIREBASE_AUTH_DOMAIN || firebaseConfig.authDomain
+  return authDomain ? `https://${authDomain}/auth` : ''
+}
+
+function buildAuthBridgeUrl(base: string, state: string): string | null {
+  if (!base) return null
+  try {
+    const url = new URL(base)
+    if (state) url.searchParams.set('state', state)
+    return url.toString()
+  } catch {
+    return null
+  }
+}
+
+function generateAuthState(): string {
+  try {
+    const bytes = new Uint8Array(16)
+    crypto.getRandomValues(bytes)
+    return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
+  } catch {
+    return Math.random().toString(36).slice(2)
+  }
 }
 
 function GoogleIcon() {
@@ -92,6 +272,9 @@ const styles: Record<string, h.JSX.CSSProperties> = {
     alignItems: 'center',
     justifyContent: 'center',
     padding: '40px 24px',
+    width: '100%',
+    maxWidth: '480px',
+    margin: '0 auto',
     minHeight: '100%',
     boxSizing: 'border-box',
     textAlign: 'center'
@@ -110,7 +293,7 @@ const styles: Record<string, h.JSX.CSSProperties> = {
     fontSize: '12px',
     color: 'var(--figma-color-text-secondary)',
     lineHeight: 1.5,
-    maxWidth: '220px'
+    maxWidth: '100%'
   },
   error: {
     marginBottom: '16px',
@@ -144,5 +327,48 @@ const styles: Record<string, h.JSX.CSSProperties> = {
   buttonContent: {
     display: 'flex',
     alignItems: 'center'
+  },
+  skipButton: {
+    marginTop: '10px',
+    background: 'none',
+    border: 'none',
+    color: 'var(--figma-color-text-secondary)',
+    fontSize: '11px',
+    cursor: 'pointer',
+    textDecoration: 'underline',
+    padding: '4px'
+  },
+  bridgePanel: {
+    marginTop: '16px',
+    padding: '12px',
+    borderRadius: '8px',
+    border: '1px solid var(--figma-color-border)',
+    backgroundColor: 'var(--figma-color-bg-secondary)',
+    width: '100%',
+    boxSizing: 'border-box',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px'
+  },
+  bridgeText: {
+    margin: 0,
+    fontSize: '11px',
+    color: 'var(--figma-color-text-secondary)',
+    lineHeight: 1.4
+  },
+  bridgeStatus: {
+    margin: 0,
+    fontSize: '11px',
+    color: 'var(--figma-color-text)',
+    fontWeight: 500
+  },
+  secondaryButton: {
+    background: 'none',
+    border: 'none',
+    color: 'var(--figma-color-text-secondary)',
+    fontSize: '11px',
+    cursor: 'pointer',
+    textDecoration: 'underline',
+    padding: 0
   }
 }

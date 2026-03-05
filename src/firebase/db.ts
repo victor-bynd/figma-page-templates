@@ -4,13 +4,18 @@ import {
   doc,
   setDoc,
   addDoc,
+  updateDoc,
   deleteDoc,
   collection,
+  query,
+  where,
+  getDocs,
+  writeBatch,
   serverTimestamp,
   type Firestore
 } from 'firebase/firestore'
 import { app } from './config'
-import type { OrgUser, Template } from '@shared/types'
+import type { OrgUser, Template, TemplateGroup } from '@shared/types'
 
 let _db: Firestore | null = null
 
@@ -21,14 +26,33 @@ let _db: Firestore | null = null
 export function getDb(): Firestore {
   if (_db) return _db
   _db = getFirestore(app)
-  enableIndexedDbPersistence(_db).catch(err => {
-    if (err.code === 'failed-precondition') {
-      console.warn('[Firestore] Persistence unavailable: multiple tabs open.')
-    } else if (err.code === 'unimplemented') {
-      console.warn('[Firestore] Persistence not supported in this environment.')
-    }
-  })
+  if (canUseIndexedDbPersistence()) {
+    enableIndexedDbPersistence(_db).catch(err => {
+      if (err.code === 'failed-precondition') {
+        console.warn('[Firestore] Persistence unavailable: multiple tabs open.')
+      } else if (err.code === 'unimplemented') {
+        console.warn('[Firestore] Persistence not supported in this environment.')
+      } else {
+        console.warn('[Firestore] Persistence failed:', err)
+      }
+    })
+  } else {
+    console.warn('[Firestore] Persistence disabled: storage is not available in this environment.')
+  }
   return _db
+}
+
+function canUseIndexedDbPersistence(): boolean {
+  if (typeof window === 'undefined') return false
+  try {
+    if (window.location?.protocol === 'data:') return false
+    const testKey = '__firestore_persistence_test__'
+    window.localStorage.setItem(testKey, '1')
+    window.localStorage.removeItem(testKey)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -81,6 +105,97 @@ export async function deleteTemplate(orgId: string, templateId: string): Promise
 }
 
 /**
+ * Saves a new group document under `orgs/{orgId}/groups`.
+ * @returns The new Firestore document ID.
+ */
+export async function saveTemplateGroup(
+  orgId: string,
+  group: Omit<TemplateGroup, 'id' | 'createdAt' | 'updatedAt'>
+): Promise<string> {
+  const db = getDb()
+  const ref = await addDoc(collection(db, 'orgs', orgId, 'groups'), {
+    ...group,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  })
+  return ref.id
+}
+
+/**
+ * Updates the name of a group document.
+ */
+export async function updateTemplateGroup(
+  orgId: string,
+  groupId: string,
+  name: string
+): Promise<void> {
+  const db = getDb()
+  await updateDoc(doc(db, 'orgs', orgId, 'groups', groupId), {
+    name,
+    updatedAt: serverTimestamp()
+  })
+}
+
+/**
+ * Deletes a group and nullifies groupId on all templates that reference it.
+ * Uses a Firestore batch for atomicity (safe up to ~500 templates).
+ */
+export async function deleteTemplateGroup(orgId: string, groupId: string): Promise<void> {
+  const db = getDb()
+  const batch = writeBatch(db)
+
+  const templatesSnap = await getDocs(
+    query(collection(db, 'orgs', orgId, 'templates'), where('groupId', '==', groupId))
+  )
+  templatesSnap.docs.forEach(d => batch.update(d.ref, { groupId: null }))
+  batch.delete(doc(db, 'orgs', orgId, 'groups', groupId))
+
+  await batch.commit()
+}
+
+/**
+ * Batch-updates the `order` field on all groups to reflect a new sort order.
+ */
+export async function reorderTemplateGroups(
+  orgId: string,
+  orderedGroups: Array<{ id: string; order: number }>
+): Promise<void> {
+  const db = getDb()
+  const batch = writeBatch(db)
+  orderedGroups.forEach(({ id, order }) => {
+    batch.update(doc(db, 'orgs', orgId, 'groups', id), { order, updatedAt: serverTimestamp() })
+  })
+  await batch.commit()
+}
+
+/**
+ * Sets the `groupId` field on a single template document.
+ */
+export async function moveTemplateToGroupFirestore(
+  orgId: string,
+  templateId: string,
+  groupId: string | null
+): Promise<void> {
+  const db = getDb()
+  await updateDoc(doc(db, 'orgs', orgId, 'templates', templateId), { groupId })
+}
+
+/**
+ * Updates the name of a template document.
+ */
+export async function updateTemplateName(
+  orgId: string,
+  templateId: string,
+  name: string
+): Promise<void> {
+  const db = getDb()
+  await updateDoc(doc(db, 'orgs', orgId, 'templates', templateId), {
+    name,
+    updatedAt: serverTimestamp()
+  })
+}
+
+/**
  * Upserts a user document at `users/{uid}`.
  * Always updates `lastSeenAt`; other fields only written on first creation via merge.
  */
@@ -90,7 +205,6 @@ export async function upsertUser(user: OrgUser): Promise<void> {
     doc(db, 'users', user.uid),
     {
       email: user.email,
-      orgId: user.orgId,
       displayName: user.displayName,
       lastSeenAt: serverTimestamp()
     },

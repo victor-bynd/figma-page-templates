@@ -5,6 +5,11 @@ import type { TemplatePage, Template } from '@shared/types'
 
 export type ApplyStatus = 'idle' | 'applying' | 'success' | 'error'
 
+interface PageState {
+  name: string
+  enabled: boolean
+}
+
 interface ApplyConfirmProps {
   template: Template
   /** Pages in the current Figma file, used to detect conflicts. Null while scanning. */
@@ -16,6 +21,47 @@ interface ApplyConfirmProps {
   onSetupCover?: () => void
 }
 
+function Toggle({
+  checked,
+  onChange,
+  disabled
+}: {
+  checked: boolean
+  onChange: () => void
+  disabled?: boolean
+}) {
+  return (
+    <div
+      style={{
+        width: '26px',
+        height: '14px',
+        borderRadius: '7px',
+        backgroundColor: checked
+          ? 'var(--figma-color-bg-brand)'
+          : 'var(--figma-color-border)',
+        position: 'relative',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        flexShrink: 0,
+        transition: 'background-color 0.15s'
+      }}
+      onClick={disabled ? undefined : onChange}
+    >
+      <div
+        style={{
+          position: 'absolute',
+          width: '10px',
+          height: '10px',
+          borderRadius: '50%',
+          backgroundColor: 'white',
+          top: '2px',
+          left: checked ? '14px' : '2px',
+          transition: 'left 0.15s'
+        }}
+      />
+    </div>
+  )
+}
+
 export function ApplyConfirm({
   template,
   currentPages,
@@ -24,13 +70,24 @@ export function ApplyConfirm({
   onBack,
   onSetupCover
 }: ApplyConfirmProps) {
+  const nonCoverPages = template.pages.filter(p => p.name !== 'Cover')
+
+  const [pageStates, setPageStates] = useState<PageState[]>(() =>
+    nonCoverPages.map(p => ({ name: p.name, enabled: true }))
+  )
+  const [replaceAll, setReplaceAll] = useState(false)
+  const [focusedIndex, setFocusedIndex] = useState<number | null>(null)
   const [localPending, setLocalPending] = useState(false)
   const [confirmOpen, setConfirmOpen] = useState(false)
 
   const existingNames = new Set((currentPages ?? []).map(p => p.name))
-  const conflicts = template.pages
-    .filter(p => p.name !== 'Cover' && existingNames.has(p.name))
-    .map(p => p.name)
+
+  // Conflicts only matter when replaceAll is off
+  const conflicts = replaceAll
+    ? []
+    : pageStates
+        .filter(s => s.enabled && existingNames.has(s.name))
+        .map(s => s.name)
 
   const isApplying = localPending || status === 'applying'
 
@@ -41,6 +98,14 @@ export function ApplyConfirm({
     }
   }, [status])
 
+  function updatePageName(index: number, name: string) {
+    setPageStates(prev => prev.map((s, i) => (i === index ? { ...s, name } : s)))
+  }
+
+  function togglePage(index: number) {
+    setPageStates(prev => prev.map((s, i) => (i === index ? { ...s, enabled: !s.enabled } : s)))
+  }
+
   function handleRequestApply() {
     if (isApplying) return
     setConfirmOpen(true)
@@ -49,7 +114,34 @@ export function ApplyConfirm({
   function handleConfirmApply() {
     if (isApplying) return
     setLocalPending(true)
-    sendMessage({ type: 'APPLY_TEMPLATE', pages: template.pages })
+    const pagesToApply: TemplatePage[] = []
+    nonCoverPages.forEach((page, i) => {
+      if (pageStates[i].enabled) {
+        pagesToApply.push({ ...page, name: pageStates[i].name })
+      }
+    })
+
+    let coverInsertIndex: number | null = null
+    let nonCoverIndex = 0
+    let enabledBeforeCover = 0
+
+    for (const page of template.pages) {
+      if (page.name === 'Cover') {
+        coverInsertIndex = enabledBeforeCover
+        break
+      }
+
+      const state = pageStates[nonCoverIndex]
+      if (state?.enabled) enabledBeforeCover += 1
+      nonCoverIndex += 1
+    }
+
+    sendMessage({
+      type: 'APPLY_TEMPLATE',
+      pages: pagesToApply,
+      replaceAll,
+      coverInsertIndex
+    })
   }
 
   if (status === 'success') {
@@ -59,9 +151,16 @@ export function ApplyConfirm({
           <div style={styles.successIcon}>✓</div>
           <p style={styles.successText}>Template applied successfully!</p>
           {onSetupCover && (
-            <button style={styles.primaryBtn} onClick={onSetupCover}>Set up Cover</button>
+            <button style={styles.primaryBtn} onClick={onSetupCover}>
+              Set up Cover
+            </button>
           )}
-          <button style={onSetupCover ? styles.ghostBtn : styles.primaryBtn} onClick={onBack}>Done</button>
+          <button
+            style={onSetupCover ? styles.ghostBtn : styles.primaryBtn}
+            onClick={onBack}
+          >
+            Done
+          </button>
         </div>
       </div>
     )
@@ -87,27 +186,62 @@ export function ApplyConfirm({
         {/* Page list */}
         <div style={styles.sectionLabel}>Pages that will be created</div>
         <div style={styles.pageList}>
-          {template.pages
-            .filter(p => p.name !== 'Cover')
-            .map(page => (
-              <div key={page.name} style={styles.pageRow}>
-                <span style={styles.pageIcon}>▤</span>
-                <span style={styles.pageName}>{page.name}</span>
-                <span style={styles.sectionCount}>
-                  {page.sections.length} frame{page.sections.length !== 1 ? 's' : ''}
-                </span>
-                {existingNames.has(page.name) && (
-                  <span style={styles.skipBadge}>skip</span>
-                )}
+          {nonCoverPages.map((page, i) => {
+            const state = pageStates[i]
+            const isConflict = !replaceAll && existingNames.has(state.name)
+            return (
+              <div
+                key={i}
+                style={{
+                  ...styles.pageRow,
+                  opacity: state.enabled ? 1 : 0.4
+                }}
+              >
+                <div style={styles.pageMain}>
+                  <Toggle
+                    checked={state.enabled}
+                    onChange={() => togglePage(i)}
+                    disabled={isApplying}
+                  />
+                  <span style={styles.pageIcon}>▤</span>
+                  <input
+                    style={{
+                      ...styles.nameInput,
+                      textDecoration: !state.enabled ? 'line-through' : 'none',
+                      borderBottomColor:
+                        focusedIndex === i
+                          ? 'var(--figma-color-border-strong)'
+                          : 'transparent'
+                    }}
+                    value={state.name}
+                    onInput={e =>
+                      updatePageName(i, (e.target as HTMLInputElement).value)
+                    }
+                    onFocus={() => setFocusedIndex(i)}
+                    onBlur={() => setFocusedIndex(null)}
+                    disabled={isApplying || !state.enabled}
+                  />
+                </div>
+                <div style={styles.pageMeta}>
+                  <span style={styles.sectionCount}>
+                    {page.sections.length} frame
+                    {page.sections.length !== 1 ? 's' : ''}
+                  </span>
+                  {state.enabled && isConflict && (
+                    <span style={styles.skipBadge}>exists</span>
+                  )}
+                </div>
               </div>
-            ))}
+            )
+          })}
         </div>
 
         {/* Conflict warning */}
         {conflicts.length > 0 && (
           <div style={styles.warning}>
-            <strong>Note:</strong> {conflicts.length} page{conflicts.length !== 1 ? 's' : ''} already
-            exist ({conflicts.join(', ')}) and will be skipped.
+            <strong>Note:</strong> {conflicts.length} page
+            {conflicts.length !== 1 ? 's' : ''} already exist (
+            {conflicts.join(', ')}) and will be skipped.
           </div>
         )}
 
@@ -116,13 +250,24 @@ export function ApplyConfirm({
           <div style={styles.error}>{error}</div>
         )}
 
+        {/* Replace all toggle */}
+        <div style={styles.replaceAllRow}>
+          <div style={styles.replaceAllText}>
+            <span style={styles.replaceAllLabel}>Replace all existing pages</span>
+            <span style={styles.replaceAllDesc}>
+              Removes current pages before applying
+            </span>
+          </div>
+          <Toggle
+            checked={replaceAll}
+            onChange={() => setReplaceAll(v => !v)}
+            disabled={isApplying}
+          />
+        </div>
+
         {/* Actions */}
         <div style={styles.actions}>
-          <button
-            style={styles.cancelBtn}
-            onClick={onBack}
-            disabled={isApplying}
-          >
+          <button style={styles.cancelBtn} onClick={onBack} disabled={isApplying}>
             Cancel
           </button>
           <button
@@ -143,11 +288,13 @@ export function ApplyConfirm({
           <div role="dialog" aria-modal="true" style={styles.dialog}>
             <div style={styles.dialogTitle}>Apply this template?</div>
             <div style={styles.dialogBody}>
-              This will create pages and frames in your current file.
-              {conflicts.length > 0 && (
+              {replaceAll
+                ? 'This will remove all existing pages and replace them with the template pages.'
+                : 'This will create pages and frames in your current file.'}
+              {!replaceAll && conflicts.length > 0 && (
                 <div style={styles.dialogWarning}>
-                  {conflicts.length} page{conflicts.length !== 1 ? 's' : ''} already exist
-                  ({conflicts.join(', ')}) and will be skipped.
+                  {conflicts.length} page{conflicts.length !== 1 ? 's' : ''}{' '}
+                  already exist ({conflicts.join(', ')}) and will be skipped.
                 </div>
               )}
             </div>
@@ -233,21 +380,39 @@ const styles: Record<string, h.JSX.CSSProperties> = {
   },
   pageRow: {
     display: 'flex',
-    alignItems: 'center',
-    gap: '6px',
+    flexDirection: 'column',
+    gap: '4px',
     padding: '3px 0',
     fontSize: '12px',
     color: 'var(--figma-color-text)'
   },
+  pageMain: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    minWidth: 0
+  },
   pageIcon: {
     color: 'var(--figma-color-text-secondary)',
-    fontSize: '11px'
+    fontSize: '11px',
+    flexShrink: 0
   },
-  pageName: {
+  nameInput: {
     flex: 1,
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap'
+    background: 'transparent',
+    border: 'none',
+    borderBottom: '1px solid transparent',
+    color: 'var(--figma-color-text)',
+    fontSize: '12px',
+    padding: '1px 2px',
+    outline: 'none',
+    minWidth: 0
+  },
+  pageMeta: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    flexWrap: 'wrap'
   },
   sectionCount: {
     fontSize: '11px',
@@ -258,15 +423,17 @@ const styles: Record<string, h.JSX.CSSProperties> = {
     fontSize: '10px',
     padding: '1px 5px',
     borderRadius: '4px',
-    backgroundColor: 'var(--figma-color-bg-warning, #FFF3CD)',
-    color: 'var(--figma-color-text-warning, #856404)',
+    backgroundColor: 'rgba(251, 146, 60, 0.15)',
+    color: '#FB923C',
+    border: '1px solid rgba(251, 146, 60, 0.3)',
     flexShrink: 0
   },
   warning: {
     padding: '8px',
     borderRadius: '6px',
-    backgroundColor: 'var(--figma-color-bg-warning, #FFF3CD)',
-    color: 'var(--figma-color-text-warning, #856404)',
+    backgroundColor: 'rgba(251, 146, 60, 0.1)',
+    color: '#FB923C',
+    border: '1px solid rgba(251, 146, 60, 0.25)',
     fontSize: '11px',
     marginBottom: '12px'
   },
@@ -278,10 +445,34 @@ const styles: Record<string, h.JSX.CSSProperties> = {
     fontSize: '11px',
     marginBottom: '12px'
   },
+  replaceAllRow: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '12px',
+    padding: '10px 0',
+    borderTop: '1px solid var(--figma-color-border)',
+    marginBottom: '8px'
+  },
+  replaceAllText: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '2px'
+  },
+  replaceAllLabel: {
+    fontSize: '12px',
+    color: 'var(--figma-color-text)',
+    fontWeight: 500
+  },
+  replaceAllDesc: {
+    fontSize: '11px',
+    color: 'var(--figma-color-text-secondary)'
+  },
   actions: {
     display: 'flex',
     gap: '8px',
-    marginTop: '8px'
+    flexWrap: 'wrap',
+    marginTop: '4px'
   },
   cancelBtn: {
     flex: 1,
@@ -355,7 +546,7 @@ const styles: Record<string, h.JSX.CSSProperties> = {
   },
   dialog: {
     width: '100%',
-    maxWidth: '320px',
+    maxWidth: 'min(420px, 100%)',
     borderRadius: '8px',
     backgroundColor: 'var(--figma-color-bg)',
     border: '1px solid var(--figma-color-border)',
@@ -377,8 +568,9 @@ const styles: Record<string, h.JSX.CSSProperties> = {
     marginTop: '8px',
     padding: '6px',
     borderRadius: '6px',
-    backgroundColor: 'var(--figma-color-bg-warning, #FFF3CD)',
-    color: 'var(--figma-color-text-warning, #856404)',
+    backgroundColor: 'rgba(251, 146, 60, 0.1)',
+    color: '#FB923C',
+    border: '1px solid rgba(251, 146, 60, 0.25)',
     fontSize: '11px'
   },
   dialogActions: {

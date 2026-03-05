@@ -15,17 +15,23 @@ interface CoverSetupProps {
     onSkip: () => void
     /** Called when the user hits the back button. */
     onBack: () => void
+    /**
+     * Library pre-configured by the template creator. When provided, the
+     * "connect" step is skipped and the component picker loads immediately.
+     */
+    preloadedLibrary?: { fileUrl: string; fileKey: string } | null
 }
 
 type Step = 'connect' | 'pick' | 'fields'
 
-export function CoverSetup({ onComponentSelected, onSkip, onBack }: CoverSetupProps) {
-    const [step, setStep] = useState<Step>('connect')
-    const [fileUrl, setFileUrl] = useState('')
+export function CoverSetup({ onComponentSelected, onSkip, onBack, preloadedLibrary }: CoverSetupProps) {
+    // If a library was pre-configured in the template, start at pick.
+    const [step, setStep] = useState<Step>(preloadedLibrary ? 'pick' : 'connect')
+    const [fileUrl, setFileUrl] = useState(preloadedLibrary?.fileUrl ?? '')
     const [pat, setPat] = useState('')
     const [patLoaded, setPatLoaded] = useState(false)
     const [urlError, setUrlError] = useState<string | null>(null)
-    const [fileKey, setFileKey] = useState<string | null>(null)
+    const [fileKey, setFileKey] = useState<string | null>(preloadedLibrary?.fileKey ?? null)
 
     const [textLayers, setTextLayers] = useState<TextLayerOverride[]>([])
     const [applying, setApplying] = useState(false)
@@ -56,7 +62,7 @@ export function CoverSetup({ onComponentSelected, onSkip, onBack }: CoverSetupPr
         return () => window.removeEventListener('message', handleMessage)
     }, [])
 
-    // When components arrive, advance to picker step
+    // When components arrive from a freshly-loaded library, advance to picker.
     useEffect(() => {
         if (components.length > 0 && !loading && step === 'connect') {
             setStep('pick')
@@ -77,7 +83,6 @@ export function CoverSetup({ onComponentSelected, onSkip, onBack }: CoverSetupPr
             return
         }
 
-        // Persist PAT for future sessions
         sendMessage({ type: 'SAVE_PAT', pat: pat.trim() })
         setFileKey(key)
     }
@@ -89,7 +94,42 @@ export function CoverSetup({ onComponentSelected, onSkip, onBack }: CoverSetupPr
         setStep('connect')
     }
 
-    // ----- Step 1: Connect library -----
+    // ----- Step: Edit overrides -----
+    if (step === 'fields') {
+        return (
+            <div style={styles.container}>
+                <div style={styles.header}>
+                    <button style={styles.backBtn} onClick={() => setStep('pick')}>← Back</button>
+                    <span style={styles.title}>Edit Cover</span>
+                    <button style={styles.skipBtn} onClick={onSkip}>Skip</button>
+                </div>
+
+                <div style={styles.content}>
+                    {textLayers.length === 0 ? (
+                        <div style={styles.instructions}>
+                            No text layers found in this component.
+                        </div>
+                    ) : (
+                        <div style={styles.instructions}>
+                            Update the text fields below. Leave blank to keep the defaults.
+                        </div>
+                    )}
+
+                    <CoverFieldEditor
+                        layers={textLayers}
+                        isApplying={applying}
+                        onSubmit={(overrides, imageBytes) => {
+                            setApplying(true)
+                            sendMessage({ type: 'SET_OVERRIDES', overrides, imageBytes })
+                            onComponentSelected('done')
+                        }}
+                    />
+                </div>
+            </div>
+        )
+    }
+
+    // ----- Step: Connect library (full flow, no preloaded library) -----
     if (step === 'connect') {
         return (
             <div style={styles.container}>
@@ -151,56 +191,66 @@ export function CoverSetup({ onComponentSelected, onSkip, onBack }: CoverSetupPr
         )
     }
 
-    // ----- Step 3: Edit overrides -----
-    if (step === 'fields') {
+    // ----- Step: Pick component -----
+    // With a preloaded library: if PAT isn't stored yet, show a minimal PAT prompt.
+    if (preloadedLibrary && patLoaded && !pat) {
         return (
             <div style={styles.container}>
                 <div style={styles.header}>
-                    <button style={styles.backBtn} onClick={() => setStep('pick')}>← Back</button>
-                    <span style={styles.title}>Edit Cover</span>
+                    <button style={styles.backBtn} onClick={onBack}>← Back</button>
+                    <span style={styles.title}>Cover Setup</span>
                     <button style={styles.skipBtn} onClick={onSkip}>Skip</button>
                 </div>
-
                 <div style={styles.content}>
-                    {textLayers.length === 0 ? (
-                        <div style={styles.instructions}>
-                            No text layers found in this component.
-                        </div>
-                    ) : (
-                        <div style={styles.instructions}>
-                            Update the text fields below. Leave blank to keep the defaults.
-                        </div>
-                    )}
-
-                    <CoverFieldEditor
-                        layers={textLayers}
-                        isApplying={applying}
-                        onSubmit={(overrides, imageBytes) => {
-                            setApplying(true)
-                            sendMessage({ type: 'SET_OVERRIDES', overrides, imageBytes })
-                            // The componentSelected callback actually means we are done
-                            // We don't have the componentKey here locally since it was sent before,
-                            // but the App component only needs to know we finished to close the flow.
-                            onComponentSelected('done')
-                        }}
+                    <p style={styles.instructions}>
+                        Enter your Figma Personal Access Token to load cover options from the linked library.
+                    </p>
+                    <label style={styles.label}>Personal Access Token</label>
+                    <input
+                        style={styles.input}
+                        type="password"
+                        placeholder="figd_…"
+                        value={pat}
+                        onInput={(e) => setPat((e.target as HTMLInputElement).value)}
                     />
+                    {libError && <div style={styles.error}>{libError}</div>}
+                    <button
+                        style={{ ...styles.primaryBtn, opacity: loading ? 0.6 : 1 }}
+                        onClick={() => sendMessage({ type: 'SAVE_PAT', pat: pat.trim() })}
+                        disabled={loading || !pat.trim()}
+                    >
+                        {loading ? 'Loading…' : 'Load Components'}
+                    </button>
                 </div>
             </div>
         )
     }
 
-    // ----- Step 2: Pick component -----
+    // Normal pick step (library loaded, components available)
     return (
         <div style={styles.container}>
             <div style={styles.header}>
-                <button style={styles.backBtn} onClick={() => setStep('connect')}>← Back</button>
+                <button
+                    style={styles.backBtn}
+                    onClick={() => preloadedLibrary ? onBack() : setStep('connect')}
+                >
+                    ← Back
+                </button>
                 <span style={styles.title}>Select Component</span>
                 <button style={styles.skipBtn} onClick={onSkip}>Skip</button>
             </div>
 
-            {(step === 'pick' && urlError) && (
+            {urlError && (
                 <div style={{ padding: '16px 16px 0' }}>
                     <div style={styles.error}>{urlError}</div>
+                </div>
+            )}
+
+            {preloadedLibrary && (
+                <div style={styles.libraryBadge}>
+                    <span style={styles.libraryBadgeText}>
+                        Linked library · {pat && patLoaded ? 'components loaded from template' : 'loading…'}
+                    </span>
                 </div>
             )}
 
@@ -254,6 +304,15 @@ const styles: Record<string, h.JSX.CSSProperties> = {
         color: 'var(--figma-color-text-secondary)',
         fontSize: '11px',
         cursor: 'pointer'
+    },
+    libraryBadge: {
+        padding: '6px 16px',
+        borderBottom: '1px solid var(--figma-color-border)',
+        backgroundColor: 'var(--figma-color-bg-secondary)'
+    },
+    libraryBadgeText: {
+        fontSize: '11px',
+        color: 'var(--figma-color-text-secondary)'
     },
     content: {
         flex: 1,

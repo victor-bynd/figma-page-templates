@@ -167,6 +167,7 @@ const styles: Record<string, h.JSX.CSSProperties> = {
         display: 'flex',
         alignItems: 'center',
         gap: '8px',
+        flexWrap: 'wrap',
         marginTop: '4px'
     },
     fileInput: {
@@ -199,6 +200,7 @@ const styles: Record<string, h.JSX.CSSProperties> = {
     actions: {
         display: 'flex',
         gap: '8px',
+        flexWrap: 'wrap',
         marginTop: '12px'
     },
     ghostBtn: {

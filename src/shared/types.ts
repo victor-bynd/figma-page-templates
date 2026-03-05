@@ -71,6 +71,25 @@ export interface OrgUser {
 }
 
 /**
+ * A named folder-style container for grouping templates.
+ * Stored under orgs/{orgId}/groups or in figma.clientStorage in local mode.
+ */
+export interface TemplateGroup {
+  /** Unique identifier. */
+  id: string
+  /** Display name for the group. Max 24 chars recommended. */
+  name: string
+  /** Zero-based sort position used for manual reordering. */
+  order: number
+  /** UID (or "local") of the user who created this group. */
+  createdBy: string
+  /** Server timestamp of creation. */
+  createdAt: Date | null
+  /** Server timestamp of last update. */
+  updatedAt: Date | null
+}
+
+/**
  * A full template document stored in Firestore under orgs/{orgId}/templates.
  */
 export interface Template {
@@ -94,4 +113,6 @@ export interface Template {
   createdAt: Date | null
   /** Firestore server timestamp of last update. */
   updatedAt: Date | null
+  /** ID of the group this template belongs to. null / absent = ungrouped. */
+  groupId?: string | null
 }

@@ -3,6 +3,8 @@
   "dependencies": {
     "@create-figma-plugin/ui": "^4.0.3",
     "@create-figma-plugin/utilities": "^4.0.3",
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/sortable": "^10.0.0",
     "firebase": "^11.0.0",
     "preact": ">=10"
   },
@@ -36,7 +38,7 @@
     "editorType": [
       "figma"
     ],
-    "id": "",
+    "id": "1611053269780224973",
     "name": "Page Templates",
     "main": "src/plugin/code.ts",
     "ui": "src/ui/App.tsx",

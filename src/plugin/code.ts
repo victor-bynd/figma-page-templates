@@ -8,8 +8,44 @@ import {
   applyTextOverrides,
   swapCoverImage
 } from './cover'
-import { cacheAuthToken, getCachedAuthToken, savePAT, getPAT, clearPAT } from './storage'
+import {
+  cacheAuthToken,
+  getCachedAuthToken,
+  cacheOAuthTokens,
+  getCachedOAuthTokens,
+  cacheRefreshToken,
+  getCachedRefreshToken,
+  clearCachedRefreshToken,
+  savePAT,
+  getPAT,
+  clearPAT,
+  getLocalTemplates,
+  saveLocalTemplate,
+  deleteLocalTemplate,
+  updateLocalTemplateName,
+  getLocalGroups,
+  saveLocalGroup,
+  updateLocalGroup,
+  deleteLocalGroup,
+  reorderLocalGroups,
+  moveTemplateToGroup
+} from './storage'
 import { showUI } from '@create-figma-plugin/utilities'
+
+// ---------------------------------------------------------------------------
+// URL allowlist for OPEN_EXTERNAL_URL
+// ---------------------------------------------------------------------------
+
+const ALLOWED_URL_PATTERNS = [
+  /^https:\/\/[a-z0-9-]+\.web\.app(\/|$)/,
+  /^https:\/\/[a-z0-9-]+\.firebaseapp\.com(\/|$)/,
+  /^http:\/\/localhost(:\d+)?(\/|$)/,
+  /^http:\/\/127\.0\.0\.1(:\d+)?(\/|$)/,
+]
+
+function isAllowedExternalUrl(url: string): boolean {
+  return ALLOWED_URL_PATTERNS.some(pattern => pattern.test(url))
+}
 
 // ---------------------------------------------------------------------------
 // Helper to post a typed message back to the UI iframe.
@@ -38,7 +74,10 @@ function handleCaptureStructure(): void {
 
 function handleApplyTemplate(msg: PluginMessage & { type: 'APPLY_TEMPLATE' }): void {
   try {
-    applyTemplate(msg.pages)
+    applyTemplate(msg.pages, {
+      replaceAll: msg.replaceAll,
+      coverInsertIndex: msg.coverInsertIndex
+    })
     postToUI({ type: 'TEMPLATE_APPLIED' })
   } catch (err) {
     postToUI({
@@ -133,6 +172,18 @@ function setupMessageHandler(): void {
         await cacheAuthToken(message.token, message.cachedAt)
         break
 
+      case 'CACHE_OAUTH_TOKENS':
+        await cacheOAuthTokens(message.tokens, message.cachedAt)
+        break
+
+      case 'CACHE_REFRESH_TOKEN':
+        await cacheRefreshToken(message.refreshToken)
+        break
+
+      case 'CLEAR_REFRESH_TOKEN':
+        await clearCachedRefreshToken()
+        break
+
       case 'SAVE_PAT':
         await savePAT(message.pat)
         break
@@ -147,6 +198,128 @@ function setupMessageHandler(): void {
         await clearPAT()
         postToUI({ type: 'PAT_RESULT', pat: null })
         break
+
+      case 'GET_LOCAL_TEMPLATES': {
+        try {
+          const templates = await getLocalTemplates()
+          postToUI({ type: 'LOCAL_TEMPLATES_RESULT', templates })
+        } catch (err) {
+          postToUI({ type: 'ERROR', code: 'LOCAL_LOAD_FAILED', message: err instanceof Error ? err.message : String(err) })
+        }
+        break
+      }
+
+      case 'SAVE_LOCAL_TEMPLATE': {
+        try {
+          const saved = await saveLocalTemplate(message.template)
+          postToUI({ type: 'LOCAL_TEMPLATE_SAVED', template: saved })
+          const allTemplates = await getLocalTemplates()
+          postToUI({ type: 'LOCAL_TEMPLATES_RESULT', templates: allTemplates })
+        } catch (err) {
+          postToUI({ type: 'ERROR', code: 'LOCAL_SAVE_FAILED', message: err instanceof Error ? err.message : String(err) })
+        }
+        break
+      }
+
+      case 'DELETE_LOCAL_TEMPLATE': {
+        try {
+          await deleteLocalTemplate(message.id)
+          const remaining = await getLocalTemplates()
+          postToUI({ type: 'LOCAL_TEMPLATES_RESULT', templates: remaining })
+        } catch (err) {
+          postToUI({ type: 'ERROR', code: 'LOCAL_DELETE_FAILED', message: err instanceof Error ? err.message : String(err) })
+        }
+        break
+      }
+
+      case 'UPDATE_LOCAL_TEMPLATE': {
+        try {
+          await updateLocalTemplateName(message.id, message.name)
+          const templates = await getLocalTemplates()
+          postToUI({ type: 'LOCAL_TEMPLATES_RESULT', templates })
+        } catch (err) {
+          postToUI({ type: 'ERROR', code: 'LOCAL_TEMPLATE_UPDATE_FAILED', message: err instanceof Error ? err.message : String(err) })
+        }
+        break
+      }
+
+      case 'GET_LOCAL_GROUPS': {
+        try {
+          const groups = await getLocalGroups()
+          postToUI({ type: 'LOCAL_GROUPS_RESULT', groups })
+        } catch (err) {
+          postToUI({ type: 'ERROR', code: 'LOCAL_GROUPS_LOAD_FAILED', message: err instanceof Error ? err.message : String(err) })
+        }
+        break
+      }
+
+      case 'SAVE_LOCAL_GROUP': {
+        try {
+          await saveLocalGroup(message.group)
+          const groups = await getLocalGroups()
+          postToUI({ type: 'LOCAL_GROUPS_RESULT', groups })
+        } catch (err) {
+          postToUI({ type: 'ERROR', code: 'LOCAL_GROUP_SAVE_FAILED', message: err instanceof Error ? err.message : String(err) })
+        }
+        break
+      }
+
+      case 'UPDATE_LOCAL_GROUP': {
+        try {
+          await updateLocalGroup(message.id, message.name)
+          const groups = await getLocalGroups()
+          postToUI({ type: 'LOCAL_GROUPS_RESULT', groups })
+        } catch (err) {
+          postToUI({ type: 'ERROR', code: 'LOCAL_GROUP_UPDATE_FAILED', message: err instanceof Error ? err.message : String(err) })
+        }
+        break
+      }
+
+      case 'DELETE_LOCAL_GROUP': {
+        try {
+          await deleteLocalGroup(message.id)
+          const [groups, templates] = await Promise.all([getLocalGroups(), getLocalTemplates()])
+          postToUI({ type: 'LOCAL_GROUPS_RESULT', groups })
+          postToUI({ type: 'LOCAL_TEMPLATES_RESULT', templates })
+        } catch (err) {
+          postToUI({ type: 'ERROR', code: 'LOCAL_GROUP_DELETE_FAILED', message: err instanceof Error ? err.message : String(err) })
+        }
+        break
+      }
+
+      case 'REORDER_LOCAL_GROUPS': {
+        try {
+          await reorderLocalGroups(message.orderedIds)
+          const groups = await getLocalGroups()
+          postToUI({ type: 'LOCAL_GROUPS_RESULT', groups })
+        } catch (err) {
+          postToUI({ type: 'ERROR', code: 'LOCAL_GROUP_REORDER_FAILED', message: err instanceof Error ? err.message : String(err) })
+        }
+        break
+      }
+
+      case 'MOVE_TEMPLATE_TO_GROUP': {
+        try {
+          await moveTemplateToGroup(message.templateId, message.groupId)
+          const templates = await getLocalTemplates()
+          postToUI({ type: 'LOCAL_TEMPLATES_RESULT', templates })
+        } catch (err) {
+          postToUI({ type: 'ERROR', code: 'LOCAL_MOVE_TEMPLATE_FAILED', message: err instanceof Error ? err.message : String(err) })
+        }
+        break
+      }
+
+      case 'RESIZE_UI': {
+        figma.ui.resize(Math.round(message.width), Math.round(message.height))
+        break
+      }
+
+      case 'OPEN_EXTERNAL_URL': {
+        if (message.url && isAllowedExternalUrl(message.url)) {
+          figma.openExternal(message.url)
+        }
+        break
+      }
 
       default: {
         const exhaustive: never = message
@@ -166,6 +339,10 @@ function setupMessageHandler(): void {
 async function init(): Promise<void> {
   const token = await getCachedAuthToken()
   postToUI({ type: 'AUTH_TOKEN_RESULT', token })
+  const tokens = await getCachedOAuthTokens()
+  postToUI({ type: 'OAUTH_TOKENS_RESULT', tokens })
+  const refreshToken = await getCachedRefreshToken()
+  postToUI({ type: 'REFRESH_TOKEN_RESULT', refreshToken })
 }
 
 // ---------------------------------------------------------------------------
