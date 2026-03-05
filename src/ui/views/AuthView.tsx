@@ -76,8 +76,13 @@ export function AuthView({ onSignedIn, onSkipSignIn }: AuthViewProps) {
       // Read orgId from the custom claim set by createAuthBridge
       const orgId = await getOrgIdFromClaims(auth.currentUser!)
       user.orgId = orgId
-      await upsertUser(user)
-      await bootstrapOrg(user.orgId, user.email.split('@')[1] ?? '')
+      // Non-blocking: auth should still complete even if bootstrap writes are denied.
+      try {
+        await upsertUser(user)
+        await bootstrapOrg(user.orgId, user.email.split('@')[1] ?? '')
+      } catch (bootstrapErr) {
+        console.warn('[AuthView] Bootstrap writes failed:', bootstrapErr)
+      }
       const cachedAt = Date.now()
       const token = await auth.currentUser!.getIdToken()
       cacheTokenLocal(token, cachedAt)

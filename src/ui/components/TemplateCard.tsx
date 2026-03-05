@@ -1,19 +1,16 @@
 import { h, Fragment } from 'preact'
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { useDraggable } from '@dnd-kit/core'
-import type { OrgUser, Template, TemplateGroup } from '@shared/types'
-import { serializeTemplate } from '@shared/utils'
+import type { OrgUser, Template } from '@shared/types'
 
 interface TemplateCardProps {
   template: Template
   currentUser: OrgUser | null
   isLocalMode?: boolean
-  groups: TemplateGroup[]
   groupBadge: string | null
   onApply: () => void
+  onEdit: () => void
   onDelete: () => void
-  onRename: (name: string) => void
-  onMoveToGroup: (groupId: string | null) => void
 }
 
 function relativeTime(date: Date | null): string {
@@ -31,17 +28,13 @@ export function TemplateCard({
   template,
   currentUser,
   isLocalMode,
-  groups,
   groupBadge,
   onApply,
-  onDelete,
-  onRename,
-  onMoveToGroup
+  onEdit,
+  onDelete
 }: TemplateCardProps) {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
-  const [renaming, setRenaming] = useState(false)
-  const [renameValue, setRenameValue] = useState('')
   const menuRef = useRef<HTMLDivElement>(null)
 
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
@@ -63,37 +56,6 @@ export function TemplateCard({
   const pageCount = template.pages.length
   const sectionCount = template.pages.reduce((sum, p) => sum + p.sections.length, 0)
 
-  function startRename() {
-    if (!isOwner) return
-    setRenaming(true)
-    setRenameValue(template.name)
-  }
-
-  function commitRename() {
-    const name = renameValue.trim()
-    if (name && name !== template.name) {
-      onRename(name)
-    }
-    setRenaming(false)
-    setRenameValue('')
-  }
-
-  function handleExport() {
-    const json = serializeTemplate(template)
-    const blob = new Blob([json], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-
-    const safeName =
-      template.name.trim().replace(/[^a-z0-9-_]+/gi, '-').replace(/^-+|-+$/g, '') ||
-      'template'
-
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${safeName}.json`
-    a.click()
-    URL.revokeObjectURL(url)
-  }
-
   const dragStyle = transform
     ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)` }
     : {}
@@ -113,24 +75,7 @@ export function TemplateCard({
     >
       <div style={styles.body}>
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '6px', minWidth: 0 }}>
-          {renaming ? (
-            <input
-              style={styles.renameInput}
-              value={renameValue}
-              maxLength={60}
-              autoFocus
-              onPointerDown={e => e.stopPropagation()}
-              onMouseDown={e => e.stopPropagation()}
-              onInput={e => setRenameValue((e.target as HTMLInputElement).value)}
-              onBlur={commitRename}
-              onKeyDown={e => {
-                if (e.key === 'Enter') commitRename()
-                if (e.key === 'Escape') { setRenaming(false); setRenameValue('') }
-              }}
-            />
-          ) : (
-            <div style={styles.name} onDblClick={startRename}>{template.name}</div>
-          )}
+          <div style={styles.name}>{template.name}</div>
           {/* Overflow menu */}
           <div ref={menuRef} style={{ position: 'relative', flexShrink: 0 }}>
             <button
@@ -145,30 +90,11 @@ export function TemplateCard({
                 {isOwner && (
                   <button
                     style={styles.menuItem}
-                    onClick={() => { setMenuOpen(false); startRename() }}
+                    onClick={() => { setMenuOpen(false); onEdit() }}
                   >
-                    Rename
+                    Edit
                   </button>
                 )}
-                <div style={styles.menuLabel}>Move to group</div>
-                <button
-                  style={styles.menuItem}
-                  onClick={() => { onMoveToGroup(null); setMenuOpen(false) }}
-                >
-                  No group
-                </button>
-                {groups.map(g => (
-                  <button
-                    key={g.id}
-                    style={{
-                      ...styles.menuItem,
-                      ...(template.groupId === g.id ? styles.menuItemActive : {})
-                    }}
-                    onClick={() => { onMoveToGroup(g.id); setMenuOpen(false) }}
-                  >
-                    {g.name}
-                  </button>
-                ))}
               </div>
             )}
           </div>
@@ -202,7 +128,6 @@ export function TemplateCard({
         ) : (
           <Fragment>
             <button style={styles.applyBtn} onClick={onApply}>Apply</button>
-            <button style={styles.exportBtn} onClick={handleExport}>Export</button>
             {isOwner && (
               <button style={styles.deleteBtn} onClick={() => setConfirmDelete(true)}>
                 Delete
@@ -236,17 +161,6 @@ const styles: Record<string, h.JSX.CSSProperties> = {
     overflow: 'hidden',
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap'
-  },
-  renameInput: {
-    fontSize: '12px',
-    fontWeight: 600,
-    color: 'var(--figma-color-text)',
-    padding: '2px 4px',
-    borderRadius: '4px',
-    border: '1px solid var(--figma-color-border)',
-    backgroundColor: 'var(--figma-color-bg)',
-    width: '100%',
-    minWidth: 0
   },
   description: {
     fontSize: '11px',
@@ -305,16 +219,6 @@ const styles: Record<string, h.JSX.CSSProperties> = {
     fontSize: '11px',
     cursor: 'pointer'
   },
-  exportBtn: {
-    flex: '1 1 90px',
-    padding: '5px 8px',
-    borderRadius: '6px',
-    border: '1px solid var(--figma-color-border)',
-    backgroundColor: 'var(--figma-color-bg)',
-    color: 'var(--figma-color-text)',
-    fontSize: '11px',
-    cursor: 'pointer'
-  },
   dangerBtn: {
     flex: '1 1 90px',
     padding: '5px 10px',
@@ -359,14 +263,6 @@ const styles: Record<string, h.JSX.CSSProperties> = {
     paddingTop: '4px',
     paddingBottom: '4px'
   },
-  menuLabel: {
-    fontSize: '10px',
-    fontWeight: 600,
-    color: 'var(--figma-color-text-secondary)',
-    padding: '4px 10px 2px',
-    textTransform: 'uppercase' as const,
-    letterSpacing: '0.5px'
-  },
   menuItem: {
     display: 'block',
     width: '100%',
@@ -377,10 +273,6 @@ const styles: Record<string, h.JSX.CSSProperties> = {
     textAlign: 'left' as const,
     fontSize: '11px',
     color: 'var(--figma-color-text)'
-  },
-  menuItemActive: {
-    fontWeight: 600,
-    color: 'var(--figma-color-text-brand, var(--figma-color-bg-brand))'
   },
   groupBadge: {
     fontSize: '10px',

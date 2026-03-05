@@ -10,6 +10,9 @@ export function useGroups(mode: 'firestore' | 'local', orgId: string) {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    // Clear stale groups from the previous mode/org before loading new ones.
+    setGroups([])
+
     if (mode === 'local') {
       setLoading(true)
       sendMessage({ type: 'GET_LOCAL_GROUPS' })

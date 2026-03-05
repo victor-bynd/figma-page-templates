@@ -31,6 +31,29 @@ export function parseFigmaFileKey(url: string): string | null {
 // ---------------------------------------------------------------------------
 
 const TEMPLATE_SCHEMA_VERSION = 1
+const ACCOUNT_SCHEMA_VERSION = 1
+
+export type ExportedTemplate = {
+  schemaVersion?: number
+  name: string
+  description: string
+  pages: TemplatePage[]
+  coverPageIndex?: number | null
+  coverConfig: CoverConfig | null
+  groupId?: string | null
+}
+
+export type ExportedGroup = {
+  id: string
+  name: string
+  order: number
+}
+
+export type AccountExport = {
+  schemaVersion: number
+  templates: ExportedTemplate[]
+  groups: ExportedGroup[]
+}
 
 /**
  * Serializes a template to JSON for export.
@@ -38,33 +61,24 @@ const TEMPLATE_SCHEMA_VERSION = 1
  * Strips environment-specific fields and any sensitive data.
  */
 export function serializeTemplate(template: Template): string {
-  const {
-    // strip fields that should not be exported
-    id: _id,
-    createdBy: _createdBy,
-    createdByEmail: _createdByEmail,
-    createdAt: _createdAt,
-    updatedAt: _updatedAt,
-    coverConfig,
-    ...rest
-  } = template
+  return JSON.stringify(serializeTemplatePayload(template), null, 2)
+}
 
-  const sanitizedCoverConfig = coverConfig
-    ? {
-        componentKey: coverConfig.componentKey,
-        library: {
-          fileKey: coverConfig.library.fileKey
-          // fileUrl intentionally omitted
-        }
-      }
-    : null
-
-  const payload = {
-    schemaVersion: TEMPLATE_SCHEMA_VERSION,
-    name: rest.name,
-    description: rest.description ?? '',
-    pages: rest.pages ?? [],
-    coverConfig: sanitizedCoverConfig
+/**
+ * Serializes all templates + groups for account-level export.
+ */
+export function serializeAccount(
+  templates: Template[],
+  groups: TemplateGroup[]
+): string {
+  const payload: AccountExport = {
+    schemaVersion: ACCOUNT_SCHEMA_VERSION,
+    templates: templates.map(serializeTemplatePayload),
+    groups: groups.map(g => ({
+      id: g.id,
+      name: g.name,
+      order: g.order
+    }))
   }
 
   return JSON.stringify(payload, null, 2)
@@ -119,6 +133,18 @@ export function validateTemplateJSON(json: unknown): Template | null {
   }
 
   const description = typeof obj.description === 'string' ? obj.description : ''
+  const coverPageIndex = (() => {
+    if (obj.coverPageIndex === null || obj.coverPageIndex === undefined) return null
+    if (
+      typeof obj.coverPageIndex === 'number' &&
+      Number.isInteger(obj.coverPageIndex) &&
+      obj.coverPageIndex >= 0 &&
+      obj.coverPageIndex < pages.length
+    ) {
+      return obj.coverPageIndex
+    }
+    return null
+  })()
 
   let coverConfig: CoverConfig | null = null
   if (obj.coverConfig && typeof obj.coverConfig === 'object') {
@@ -143,17 +169,113 @@ export function validateTemplateJSON(json: unknown): Template | null {
   const schemaVersion =
     typeof obj.schemaVersion === 'number' ? obj.schemaVersion : undefined
 
+  const groupId = (() => {
+    if (typeof obj.groupId === 'string') {
+      const trimmed = obj.groupId.trim()
+      return trimmed ? trimmed : undefined
+    }
+    if (obj.groupId === null) return null
+    return undefined
+  })()
+
   return {
     schemaVersion,
     id: '',
     name,
     description,
     pages,
+    coverPageIndex,
     coverConfig,
     createdBy: '',
     createdByEmail: '',
     createdAt: null,
-    updatedAt: null
+    updatedAt: null,
+    groupId
   }
 }
-import type { CoverConfig, Template, TemplatePage, TemplateSection } from './types'
+
+/**
+ * Validates an account-level export or a single-template JSON.
+ * Returns normalized export payloads or null if validation fails.
+ */
+export function validateAccountJSON(json: unknown): {
+  templates: ExportedTemplate[]
+  groups: ExportedGroup[]
+} | null {
+  if (!json || typeof json !== 'object') return null
+  const obj = json as Record<string, unknown>
+
+  const normalizeTemplate = (input: unknown): ExportedTemplate | null => {
+    const template = validateTemplateJSON(input)
+    if (!template) return null
+    return serializeTemplatePayload(template)
+  }
+
+  if (Array.isArray(obj.templates)) {
+    const templates: ExportedTemplate[] = []
+    for (const rawTemplate of obj.templates) {
+      const normalized = normalizeTemplate(rawTemplate)
+      if (!normalized) return null
+      templates.push(normalized)
+    }
+
+    const groups: ExportedGroup[] = []
+    if (obj.groups === undefined) {
+      // ok
+    } else if (Array.isArray(obj.groups)) {
+      for (const rawGroup of obj.groups) {
+        if (!rawGroup || typeof rawGroup !== 'object') return null
+        const groupObj = rawGroup as Record<string, unknown>
+        const id = typeof groupObj.id === 'string' ? groupObj.id.trim() : ''
+        const name = typeof groupObj.name === 'string' ? groupObj.name.trim() : ''
+        const order = groupObj.order
+        if (!id || !name || typeof order !== 'number' || !Number.isFinite(order)) return null
+        groups.push({ id, name, order })
+      }
+    } else {
+      return null
+    }
+
+    return { templates, groups }
+  }
+
+  // Fallback: accept a single-template export
+  const single = normalizeTemplate(obj)
+  if (!single) return null
+  return { templates: [single], groups: [] }
+}
+
+function serializeTemplatePayload(template: Template): ExportedTemplate {
+  const {
+    // strip fields that should not be exported
+    id: _id,
+    createdBy: _createdBy,
+    createdByEmail: _createdByEmail,
+    createdAt: _createdAt,
+    updatedAt: _updatedAt,
+    coverConfig,
+    ...rest
+  } = template
+
+  const sanitizedCoverConfig = coverConfig
+      ? {
+        componentKey: coverConfig.componentKey,
+        library: {
+          fileKey: coverConfig.library.fileKey,
+          fileUrl: coverConfig.library.fileUrl
+        }
+      }
+    : null
+
+  return {
+    schemaVersion: template.schemaVersion ?? TEMPLATE_SCHEMA_VERSION,
+    name: rest.name,
+    description: rest.description ?? '',
+    pages: rest.pages ?? [],
+    coverPageIndex: rest.coverPageIndex ?? null,
+    coverConfig: sanitizedCoverConfig,
+    groupId: rest.groupId ?? null
+  }
+}
+
+import type { CoverConfig, Template, TemplateGroup, TemplatePage, TemplateSection } from './types'

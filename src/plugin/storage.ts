@@ -181,6 +181,27 @@ export async function deleteLocalTemplate(id: string): Promise<void> {
   )
 }
 
+export async function updateLocalTemplateFull(
+  id: string,
+  data: Omit<Template, 'id' | 'createdAt' | 'updatedAt' | 'createdBy' | 'createdByEmail'>
+): Promise<Template> {
+  const templates = await getLocalTemplates()
+  const idx = templates.findIndex(t => t.id === id)
+  if (idx === -1) throw new Error(`Template ${id} not found`)
+  const updated: Template = {
+    ...templates[idx],
+    ...data,
+    id: templates[idx].id,
+    createdBy: templates[idx].createdBy,
+    createdByEmail: templates[idx].createdByEmail,
+    createdAt: templates[idx].createdAt,
+    updatedAt: null
+  }
+  templates[idx] = updated
+  await figma.clientStorage.setAsync(LOCAL_TEMPLATES_KEY, templates)
+  return updated
+}
+
 export async function updateLocalTemplateName(id: string, name: string): Promise<void> {
   const templates = await getLocalTemplates()
   const updated = templates.map(t =>
@@ -201,12 +222,16 @@ export async function getLocalGroups(): Promise<TemplateGroup[]> {
 }
 
 export async function saveLocalGroup(
-  group: Omit<TemplateGroup, 'id' | 'createdAt' | 'updatedAt'>
+  group: Omit<TemplateGroup, 'id' | 'createdAt' | 'updatedAt'> & { id?: string }
 ): Promise<TemplateGroup> {
   const groups = await getLocalGroups()
+  const requestedId = typeof group.id === 'string' ? group.id.trim() : ''
+  const resolvedId = requestedId && !groups.some(g => g.id === requestedId)
+    ? requestedId
+    : `local_${Date.now()}`
   const newGroup: TemplateGroup = {
     ...group,
-    id: `local_${Date.now()}`,
+    id: resolvedId,
     createdAt: null,
     updatedAt: null
   }

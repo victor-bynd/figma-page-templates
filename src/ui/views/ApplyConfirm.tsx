@@ -2,6 +2,7 @@ import { h } from 'preact'
 import { useEffect, useState } from 'preact/hooks'
 import { sendMessage } from '../App'
 import type { TemplatePage, Template } from '@shared/types'
+import { findFirstNamedCoverPageIndex } from '@shared/coverPage'
 
 export type ApplyStatus = 'idle' | 'applying' | 'success' | 'error'
 
@@ -70,12 +71,14 @@ export function ApplyConfirm({
   onBack,
   onSetupCover
 }: ApplyConfirmProps) {
-  const nonCoverPages = template.pages.filter(p => p.name !== 'Cover')
+  const defaultCoverPageIndex = findFirstNamedCoverPageIndex(template.pages)
+  const hasTemplateCover = defaultCoverPageIndex !== null
 
   const [pageStates, setPageStates] = useState<PageState[]>(() =>
-    nonCoverPages.map(p => ({ name: p.name, enabled: true }))
+    template.pages.map(p => ({ name: p.name, enabled: true }))
   )
-  const [replaceAll, setReplaceAll] = useState(false)
+  const [selectedCoverIndex, setSelectedCoverIndex] = useState<number | null>(defaultCoverPageIndex)
+  const [replaceAll, setReplaceAll] = useState(true)
   const [focusedIndex, setFocusedIndex] = useState<number | null>(null)
   const [localPending, setLocalPending] = useState(false)
   const [confirmOpen, setConfirmOpen] = useState(false)
@@ -86,7 +89,7 @@ export function ApplyConfirm({
   const conflicts = replaceAll
     ? []
     : pageStates
-        .filter(s => s.enabled && existingNames.has(s.name))
+        .filter((s, index) => s.enabled && index !== selectedCoverIndex && existingNames.has(s.name))
         .map(s => s.name)
 
   const isApplying = localPending || status === 'applying'
@@ -97,6 +100,12 @@ export function ApplyConfirm({
       setConfirmOpen(false)
     }
   }, [status])
+
+  useEffect(() => {
+    setPageStates(template.pages.map(p => ({ name: p.name, enabled: true })))
+    setSelectedCoverIndex(findFirstNamedCoverPageIndex(template.pages))
+    setReplaceAll(true)
+  }, [template.id, template.pages])
 
   function updatePageName(index: number, name: string) {
     setPageStates(prev => prev.map((s, i) => (i === index ? { ...s, name } : s)))
@@ -115,32 +124,36 @@ export function ApplyConfirm({
     if (isApplying) return
     setLocalPending(true)
     const pagesToApply: TemplatePage[] = []
-    nonCoverPages.forEach((page, i) => {
-      if (pageStates[i].enabled) {
-        pagesToApply.push({ ...page, name: pageStates[i].name })
+    template.pages.forEach((page, index) => {
+      if (index === selectedCoverIndex) return
+      if (pageStates[index]?.enabled) {
+        pagesToApply.push({ ...page, name: pageStates[index].name })
       }
     })
 
+    const includeCover =
+      selectedCoverIndex !== null && (pageStates[selectedCoverIndex]?.enabled ?? false)
+    const coverPageName = includeCover
+      ? (pageStates[selectedCoverIndex]?.name?.trim() || 'Cover')
+      : null
     let coverInsertIndex: number | null = null
-    let nonCoverIndex = 0
-    let enabledBeforeCover = 0
+    if (includeCover) {
+      let enabledBeforeCover = 0
 
-    for (const page of template.pages) {
-      if (page.name === 'Cover') {
-        coverInsertIndex = enabledBeforeCover
-        break
+      for (let templateIndex = 0; templateIndex < selectedCoverIndex; templateIndex += 1) {
+        const state = pageStates[templateIndex]
+        if (state?.enabled) enabledBeforeCover += 1
       }
-
-      const state = pageStates[nonCoverIndex]
-      if (state?.enabled) enabledBeforeCover += 1
-      nonCoverIndex += 1
+      coverInsertIndex = enabledBeforeCover
     }
 
     sendMessage({
       type: 'APPLY_TEMPLATE',
       pages: pagesToApply,
+      includeCover,
+      coverPageName: includeCover ? coverPageName : null,
       replaceAll,
-      coverInsertIndex
+      coverInsertIndex: includeCover ? coverInsertIndex : null
     })
   }
 
@@ -185,50 +198,82 @@ export function ApplyConfirm({
 
         {/* Page list */}
         <div style={styles.sectionLabel}>Pages that will be created</div>
+        {!hasTemplateCover && (
+          <div style={styles.coverHint}>
+            No default cover detected. Select a Cover radio on a page if you want one.
+          </div>
+        )}
         <div style={styles.pageList}>
-          {nonCoverPages.map((page, i) => {
+          {template.pages.map((page, i) => {
             const state = pageStates[i]
-            const isConflict = !replaceAll && existingNames.has(state.name)
+            const isSelectedCover = selectedCoverIndex === i
+            const isSkipped = !(state?.enabled ?? true)
+            const isConflict = !replaceAll && !isSelectedCover && state?.enabled && existingNames.has(state.name)
             return (
               <div
-                key={i}
+                key={`page-row-${i}`}
                 style={{
-                  ...styles.pageRow,
-                  opacity: state.enabled ? 1 : 0.4
+                  ...(isSelectedCover ? styles.coverRow : styles.pageRow),
+                  opacity: isSelectedCover || state?.enabled ? 1 : 0.4
                 }}
               >
                 <div style={styles.pageMain}>
-                  <Toggle
-                    checked={state.enabled}
-                    onChange={() => togglePage(i)}
-                    disabled={isApplying}
-                  />
+                  <div style={styles.skipToggleGroup}>
+                    <Toggle
+                      checked={isSkipped}
+                      onChange={() => togglePage(i)}
+                      disabled={isApplying}
+                    />
+                    <span style={styles.skipToggleLabel}>Skip</span>
+                  </div>
                   <span style={styles.pageIcon}>▤</span>
                   <input
                     style={{
                       ...styles.nameInput,
-                      textDecoration: !state.enabled ? 'line-through' : 'none',
+                      textDecoration: isSkipped ? 'line-through' : 'none',
                       borderBottomColor:
                         focusedIndex === i
                           ? 'var(--figma-color-border-strong)'
                           : 'transparent'
                     }}
-                    value={state.name}
+                    value={state?.name ?? page.name}
                     onInput={e =>
                       updatePageName(i, (e.target as HTMLInputElement).value)
                     }
                     onFocus={() => setFocusedIndex(i)}
                     onBlur={() => setFocusedIndex(null)}
-                    disabled={isApplying || !state.enabled}
+                    disabled={isApplying || isSkipped}
                   />
+                  <div style={styles.coverToggleInline}>
+                    <Toggle
+                      checked={isSelectedCover}
+                      onChange={() =>
+                        setSelectedCoverIndex(prev => (prev === i ? null : i))
+                      }
+                      disabled={isApplying}
+                    />
+                    <span style={styles.coverToggleLabel}>Use as cover</span>
+                  </div>
                 </div>
                 <div style={styles.pageMeta}>
-                  <span style={styles.sectionCount}>
-                    {page.sections.length} frame
-                    {page.sections.length !== 1 ? 's' : ''}
-                  </span>
-                  {state.enabled && isConflict && (
-                    <span style={styles.skipBadge}>exists</span>
+                  {isSelectedCover ? (
+                    <span style={styles.coverBadge}>
+                      {!state?.enabled
+                        ? 'cover skipped'
+                        : existingNames.has(state?.name ?? page.name)
+                        ? 'reused'
+                        : (hasTemplateCover && defaultCoverPageIndex === i ? 'from template' : 'manual')}
+                    </span>
+                  ) : (
+                    <div style={styles.pageMetaExtra}>
+                      <span style={styles.sectionCount}>
+                        {page.sections.length} frame
+                        {page.sections.length !== 1 ? 's' : ''}
+                      </span>
+                      {state?.enabled && isConflict && (
+                        <span style={styles.skipBadge}>exists</span>
+                      )}
+                    </div>
                   )}
                 </div>
               </div>
@@ -371,6 +416,11 @@ const styles: Record<string, h.JSX.CSSProperties> = {
     marginBottom: '6px',
     marginTop: '4px'
   },
+  coverHint: {
+    fontSize: '11px',
+    color: 'var(--figma-color-text-secondary)',
+    marginBottom: '8px'
+  },
   pageList: {
     borderRadius: '6px',
     border: '1px solid var(--figma-color-border)',
@@ -386,11 +436,30 @@ const styles: Record<string, h.JSX.CSSProperties> = {
     fontSize: '12px',
     color: 'var(--figma-color-text)'
   },
+  coverRow: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
+    padding: '3px 0',
+    fontSize: '12px',
+    color: 'var(--figma-color-text)'
+  },
   pageMain: {
     display: 'flex',
     alignItems: 'center',
     gap: '6px',
     minWidth: 0
+  },
+  skipToggleGroup: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '4px',
+    flexShrink: 0
+  },
+  skipToggleLabel: {
+    fontSize: '11px',
+    color: 'var(--figma-color-text-secondary)',
+    userSelect: 'none'
   },
   pageIcon: {
     color: 'var(--figma-color-text-secondary)',
@@ -414,6 +483,24 @@ const styles: Record<string, h.JSX.CSSProperties> = {
     gap: '6px',
     flexWrap: 'wrap'
   },
+  pageMetaExtra: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    flexWrap: 'wrap'
+  },
+  coverToggleInline: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '4px',
+    marginLeft: 'auto',
+    flexShrink: 0
+  },
+  coverToggleLabel: {
+    fontSize: '11px',
+    color: 'var(--figma-color-text-secondary)',
+    userSelect: 'none'
+  },
   sectionCount: {
     fontSize: '11px',
     color: 'var(--figma-color-text-secondary)',
@@ -426,6 +513,15 @@ const styles: Record<string, h.JSX.CSSProperties> = {
     backgroundColor: 'rgba(251, 146, 60, 0.15)',
     color: '#FB923C',
     border: '1px solid rgba(251, 146, 60, 0.3)',
+    flexShrink: 0
+  },
+  coverBadge: {
+    fontSize: '10px',
+    padding: '1px 5px',
+    borderRadius: '4px',
+    backgroundColor: 'rgba(96, 165, 250, 0.15)',
+    color: '#60A5FA',
+    border: '1px solid rgba(96, 165, 250, 0.3)',
     flexShrink: 0
   },
   warning: {

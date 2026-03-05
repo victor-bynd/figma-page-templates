@@ -72,14 +72,24 @@ describe('applyTemplate', () => {
         expect(createdPages[1].appendChild).toHaveBeenCalledTimes(0)
     })
 
+    it('creates and keeps a cover page when includeCover is true', () => {
+        applyTemplate(mockPages, { includeCover: true })
+
+        expect(global.figma.createPage).toHaveBeenCalledTimes(3)
+        expect(createdPages[0].name).toBe('Cover')
+        expect(createdPages[1].name).toBe('Page 1')
+        expect(createdPages[2].name).toBe('Page 2')
+    })
+
     it('skips existing pages by name', () => {
+        const existingPage = { name: 'Page 1', children: [], appendChild: vi.fn() } as any
         global.figma.root.children = [
-            { name: 'Page 1', children: [], appendChild: vi.fn() } as any
+            existingPage
         ]
 
         applyTemplate(mockPages)
 
-        // Should only create 'Page 2' since 'Page 1' exists
+        // Should only create Page 2 since Page 1 exists
         expect(global.figma.createPage).toHaveBeenCalledTimes(1)
         expect(createdPages[0].name).toBe('Page 2')
 
@@ -88,7 +98,7 @@ describe('applyTemplate', () => {
         expect(createdFrames[0].name).toBe('Sec 1')
 
         // The existing page should have been mutated
-        expect(global.figma.root.children[0].appendChild).toHaveBeenCalledTimes(2)
+        expect(existingPage.appendChild).toHaveBeenCalledTimes(2)
     })
 
     it('skips the Cover page silently', () => {
@@ -97,10 +107,23 @@ describe('applyTemplate', () => {
             ...mockPages
         ]
 
-        applyTemplate(pagesWithCover)
+        applyTemplate(pagesWithCover, { includeCover: true })
 
-        expect(global.figma.createPage).toHaveBeenCalledTimes(2) // Only Page 1 and Page 2
-        expect(createdPages.map(p => p.name)).not.toContain('Cover')
+        expect(global.figma.createPage).toHaveBeenCalledTimes(3) // Cover + Page 1 + Page 2
+        expect(createdPages.filter(p => p.name === 'Cover')).toHaveLength(1)
+    })
+
+    it('keeps a template page named Cover when includeCover is false', () => {
+        const pagesWithCover: TemplatePage[] = [
+            { name: 'Cover', sections: [] },
+            { name: 'Page 2', sections: [] }
+        ]
+
+        applyTemplate(pagesWithCover, { includeCover: false })
+
+        expect(global.figma.createPage).toHaveBeenCalledTimes(2)
+        expect(createdPages[0].name).toBe('Cover')
+        expect(createdPages[1].name).toBe('Page 2')
     })
 
     it('handles empty template silently', () => {

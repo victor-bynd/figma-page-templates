@@ -103,6 +103,11 @@ export interface Template {
   description: string
   /** List of pages and their sections. */
   pages: TemplatePage[]
+  /**
+   * Zero-based index of the page treated as the cover page.
+   * If null/undefined, the first page named "Cover" or "Thumbnail" is used.
+   */
+  coverPageIndex?: number | null
   /** Optional cover page component configuration. */
   coverConfig: CoverConfig | null
   /** UID of the user who created this template. */

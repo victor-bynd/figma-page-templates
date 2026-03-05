@@ -40,6 +40,9 @@ export function useTemplates(mode: 'firestore' | 'local', orgId: string) {
   }, [])
 
   useEffect(() => {
+    // Clear stale data from the previous mode/org before loading new ones.
+    setTemplates(mode === 'local' ? [] : readCache(orgId))
+
     if (mode === 'local') {
       setLoading(true)
       sendMessage({ type: 'GET_LOCAL_TEMPLATES' })
@@ -80,7 +83,12 @@ export function useTemplates(mode: 'firestore' | 'local', orgId: string) {
             name: d.name ?? '',
             description: d.description ?? '',
             pages: d.pages ?? [],
+            coverPageIndex:
+              typeof d.coverPageIndex === 'number' && Number.isInteger(d.coverPageIndex)
+                ? d.coverPageIndex
+                : null,
             coverConfig: d.coverConfig ?? null,
+            groupId: d.groupId ?? null,
             createdBy: d.createdBy ?? '',
             createdByEmail: d.createdByEmail ?? '',
             createdAt: d.createdAt instanceof Timestamp ? d.createdAt.toDate() : null,

@@ -73,6 +73,26 @@ describe('cover.ts', () => {
             expect(global.figma.createPage).not.toHaveBeenCalled()
             expect(page).toBe(existingCover)
         })
+
+        it('returns first existing alias page when no preferred name is provided', () => {
+            const existingThumbnail = { name: 'Thumbnail' } as any
+            global.figma.root.children = [
+                { name: 'P1' } as any,
+                existingThumbnail
+            ]
+
+            const page = createCoverPage()
+
+            expect(global.figma.createPage).not.toHaveBeenCalled()
+            expect(page).toBe(existingThumbnail)
+        })
+
+        it('uses preferred page name when provided', () => {
+            const page = createCoverPage('Thumbnail')
+
+            expect(global.figma.createPage).toHaveBeenCalledTimes(1)
+            expect(page.name).toBe('Thumbnail')
+        })
     })
 
     describe('placeCoverComponent', () => {

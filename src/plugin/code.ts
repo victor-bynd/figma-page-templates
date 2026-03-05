@@ -15,6 +15,7 @@ import {
   getCachedOAuthTokens,
   cacheRefreshToken,
   getCachedRefreshToken,
+  clearCachedAuthToken,
   clearCachedRefreshToken,
   savePAT,
   getPAT,
@@ -23,6 +24,7 @@ import {
   saveLocalTemplate,
   deleteLocalTemplate,
   updateLocalTemplateName,
+  updateLocalTemplateFull,
   getLocalGroups,
   saveLocalGroup,
   updateLocalGroup,
@@ -75,8 +77,10 @@ function handleCaptureStructure(): void {
 function handleApplyTemplate(msg: PluginMessage & { type: 'APPLY_TEMPLATE' }): void {
   try {
     applyTemplate(msg.pages, {
+      includeCover: msg.includeCover,
       replaceAll: msg.replaceAll,
-      coverInsertIndex: msg.coverInsertIndex
+      coverInsertIndex: msg.coverInsertIndex,
+      coverPageName: msg.coverPageName
     })
     postToUI({ type: 'TEMPLATE_APPLIED' })
   } catch (err) {
@@ -90,9 +94,9 @@ function handleApplyTemplate(msg: PluginMessage & { type: 'APPLY_TEMPLATE' }): v
 
 let currentCoverInstance: InstanceNode | null = null
 
-async function handlePlaceCover(componentKey: string) {
+async function handlePlaceCover(componentKey: string, coverPageName?: string | null) {
   try {
-    const page = createCoverPage()
+    const page = createCoverPage(coverPageName)
     const instance = await placeCoverComponent(page, componentKey)
     currentCoverInstance = instance
 
@@ -118,12 +122,20 @@ async function handleSetOverrides(msg: PluginMessage & { type: 'SET_OVERRIDES' }
   if (!currentCoverInstance) return
 
   try {
+    const coverInstance = currentCoverInstance
+
     // 1. Text overrides
-    await applyTextOverrides(currentCoverInstance, msg.overrides)
+    await applyTextOverrides(coverInstance, msg.overrides)
 
     // 2. Image swap (optional)
     if (msg.imageBytes) {
-      swapCoverImage(currentCoverInstance, msg.imageBytes)
+      swapCoverImage(coverInstance, msg.imageBytes)
+    }
+
+    // Return focus to the cover page once setup is complete.
+    const coverPage = coverInstance.parent
+    if (coverPage?.type === 'PAGE') {
+      figma.currentPage = coverPage
     }
 
     postToUI({ type: 'COVER_PLACED' })
@@ -157,7 +169,7 @@ function setupMessageHandler(): void {
         break
 
       case 'PLACE_COVER':
-        await handlePlaceCover(message.componentKey)
+        await handlePlaceCover(message.componentKey, message.coverPageName)
         break
 
       case 'GET_TEXT_LAYERS':
@@ -170,6 +182,10 @@ function setupMessageHandler(): void {
 
       case 'CACHE_AUTH_TOKEN':
         await cacheAuthToken(message.token, message.cachedAt)
+        break
+
+      case 'CLEAR_AUTH_TOKEN':
+        await clearCachedAuthToken()
         break
 
       case 'CACHE_OAUTH_TOKENS':
@@ -239,6 +255,18 @@ function setupMessageHandler(): void {
           postToUI({ type: 'LOCAL_TEMPLATES_RESULT', templates })
         } catch (err) {
           postToUI({ type: 'ERROR', code: 'LOCAL_TEMPLATE_UPDATE_FAILED', message: err instanceof Error ? err.message : String(err) })
+        }
+        break
+      }
+
+      case 'UPDATE_LOCAL_TEMPLATE_FULL': {
+        try {
+          const saved = await updateLocalTemplateFull(message.id, message.template)
+          postToUI({ type: 'LOCAL_TEMPLATE_SAVED', template: saved })
+          const allTemplates = await getLocalTemplates()
+          postToUI({ type: 'LOCAL_TEMPLATES_RESULT', templates: allTemplates })
+        } catch (err) {
+          postToUI({ type: 'ERROR', code: 'LOCAL_SAVE_FAILED', message: err instanceof Error ? err.message : String(err) })
         }
         break
       }

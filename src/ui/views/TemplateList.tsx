@@ -1,12 +1,12 @@
 import { h } from 'preact'
-import { useRef, useState } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import { useTemplates } from '../hooks/useTemplates'
 import { TemplateCard } from '../components/TemplateCard'
-import { deleteTemplate, saveTemplate, updateTemplateName } from '@backend/db'
+import { deleteTemplate, saveTemplate, saveTemplateGroup } from '@backend/db'
 import { sendMessage } from '../App'
 import type { OrgUser, Template, TemplateGroup } from '@shared/types'
 import type { GroupFilter } from '../components/GroupsSidebar'
-import { validateTemplateJSON } from '@shared/utils'
+import { serializeAccount, validateAccountJSON } from '@shared/utils'
 import { pushToast } from '../components/Toast'
 
 interface TemplateListProps {
@@ -16,7 +16,9 @@ interface TemplateListProps {
   groups: TemplateGroup[]
   onNewTemplate: () => void
   onApply: (template: Template) => void
-  onMoveToGroup: (templateId: string, groupId: string | null) => void
+  onEdit: (template: Template) => void
+  onToggleMode: () => void
+  onLogout: () => void
 }
 
 export function TemplateList({
@@ -26,7 +28,9 @@ export function TemplateList({
   groups,
   onNewTemplate,
   onApply,
-  onMoveToGroup
+  onEdit,
+  onToggleMode,
+  onLogout
 }: TemplateListProps) {
   const { templates, loading } = useTemplates(
     isLocalMode ? 'local' : 'firestore',
@@ -34,6 +38,19 @@ export function TemplateList({
   )
   const [search, setSearch] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const settingsRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!settingsOpen) return
+    const handler = (e: MouseEvent) => {
+      if (settingsRef.current && !settingsRef.current.contains(e.target as Node)) {
+        setSettingsOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [settingsOpen])
 
   const isSearchActive = search.trim().length > 0
 
@@ -59,67 +76,100 @@ export function TemplateList({
     }
   }
 
-  async function handleRename(templateId: string, name: string) {
-    if (isLocalMode) {
-      sendMessage({ type: 'UPDATE_LOCAL_TEMPLATE', id: templateId, name })
-      return
-    }
-    try {
-      await updateTemplateName(currentUser!.orgId, templateId, name)
-    } catch (err) {
-      console.error('[TemplateList] rename failed', err)
-    }
-  }
-
   async function handleImportFile(file: File) {
     try {
       const raw = await file.text()
       const parsed = JSON.parse(raw)
-      const template = validateTemplateJSON(parsed)
-      if (!template) {
-        pushToast('Invalid template JSON. Please check the file and try again.', 'error')
+      const account = validateAccountJSON(parsed)
+      if (!account) {
+        pushToast('Invalid JSON. Please check the file and try again.', 'error')
         return
       }
 
-      if (isLocalMode) {
-        await new Promise<void>((resolve, reject) => {
-          const handler = (event: MessageEvent) => {
-            const msg = event.data?.pluginMessage
-            if (!msg) return
-            if (msg.type === 'LOCAL_TEMPLATE_SAVED') {
-              window.removeEventListener('message', handler)
-              resolve()
-            } else if (msg.type === 'ERROR' && msg.code === 'LOCAL_SAVE_FAILED') {
-              window.removeEventListener('message', handler)
-              reject(new Error(msg.message ?? 'Failed to import template'))
-            }
-          }
-          window.addEventListener('message', handler)
-          sendMessage({
-            type: 'SAVE_LOCAL_TEMPLATE',
-            template: {
-              schemaVersion: template.schemaVersion,
-              name: template.name,
-              description: template.description ?? '',
-              pages: template.pages,
-              coverConfig: template.coverConfig ?? null,
-              createdBy: 'local',
-              createdByEmail: ''
-            }
-          })
-        })
-      } else {
-        await saveTemplate(currentUser!.orgId, {
-          schemaVersion: template.schemaVersion,
-          name: template.name,
-          description: template.description ?? '',
-          pages: template.pages,
-          coverConfig: template.coverConfig ?? null,
-          createdBy: currentUser!.uid,
-          createdByEmail: currentUser!.email
-        })
+      const importTemplates = account.templates
+      const importGroups = account.groups
+
+      if (importTemplates.length === 0) {
+        pushToast('No templates found in this file.', 'error')
+        return
       }
-      pushToast('Template imported successfully.', 'success')
+
+      const orderOffset = groups.length > 0
+        ? Math.max(...groups.map(g => g.order)) + 1
+        : 0
+
+      const groupIdMap = new Map<string, string>()
+
+      if (importGroups.length > 0) {
+        if (isLocalMode) {
+          const existingIds = new Set(groups.map(g => g.id))
+          for (let index = 0; index < importGroups.length; index += 1) {
+            const group = importGroups[index]
+            let desiredId = group.id
+            if (!desiredId || existingIds.has(desiredId)) {
+              desiredId = `import_${Date.now()}_${index}`
+            }
+            existingIds.add(desiredId)
+            groupIdMap.set(group.id, desiredId)
+            await saveLocalGroupAsync({
+              id: desiredId,
+              name: group.name,
+              order: group.order + orderOffset,
+              createdBy: 'local'
+            })
+          }
+        } else {
+          if (!currentUser) {
+            pushToast('You must be signed in to import templates.', 'error')
+            return
+          }
+          for (const group of importGroups) {
+            const newId = await saveTemplateGroup(currentUser.orgId, {
+              name: group.name,
+              order: group.order + orderOffset,
+              createdBy: currentUser.uid
+            })
+            groupIdMap.set(group.id, newId)
+          }
+        }
+      }
+
+      if (isLocalMode) {
+        for (const template of importTemplates) {
+          await saveLocalTemplateAsync({
+            schemaVersion: template.schemaVersion,
+            name: template.name,
+            description: template.description ?? '',
+            pages: template.pages,
+            coverPageIndex: template.coverPageIndex ?? null,
+            coverConfig: template.coverConfig ?? null,
+            groupId: template.groupId ? (groupIdMap.get(template.groupId) ?? null) : null,
+            createdBy: 'local',
+            createdByEmail: ''
+          })
+        }
+      } else {
+        if (!currentUser) {
+          pushToast('You must be signed in to import templates.', 'error')
+          return
+        }
+        for (const template of importTemplates) {
+          await saveTemplate(currentUser.orgId, {
+            schemaVersion: template.schemaVersion,
+            name: template.name,
+            description: template.description ?? '',
+            pages: template.pages,
+            coverPageIndex: template.coverPageIndex ?? null,
+            coverConfig: template.coverConfig ?? null,
+            groupId: template.groupId ? (groupIdMap.get(template.groupId) ?? null) : null,
+            createdBy: currentUser.uid,
+            createdByEmail: currentUser.email
+          })
+        }
+      }
+
+      const templateLabel = importTemplates.length === 1 ? 'template' : 'templates'
+      pushToast(`Imported ${importTemplates.length} ${templateLabel}.`, 'success')
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Import failed.'
       pushToast(message, 'error')
@@ -130,15 +180,105 @@ export function TemplateList({
     fileInputRef.current?.click()
   }
 
+  function handleExportAll() {
+    const json = serializeAccount(templates, groups)
+    const blob = new Blob([json], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+
+    const modeLabel = isLocalMode ? 'local' : 'team'
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `templates-${modeLabel}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  async function saveLocalTemplateAsync(template: Omit<Template, 'id' | 'createdAt' | 'updatedAt'>): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      const handler = (event: MessageEvent) => {
+        const msg = event.data?.pluginMessage
+        if (!msg) return
+        if (msg.type === 'LOCAL_TEMPLATE_SAVED') {
+          if (msg.template?.name !== template.name) return
+          window.removeEventListener('message', handler)
+          resolve()
+        } else if (msg.type === 'ERROR' && msg.code === 'LOCAL_SAVE_FAILED') {
+          window.removeEventListener('message', handler)
+          reject(new Error(msg.message ?? 'Failed to import template'))
+        }
+      }
+      window.addEventListener('message', handler)
+      sendMessage({ type: 'SAVE_LOCAL_TEMPLATE', template })
+    })
+  }
+
+  async function saveLocalGroupAsync(group: { id?: string; name: string; order: number; createdBy: string }): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      const handler = (event: MessageEvent) => {
+        const msg = event.data?.pluginMessage
+        if (!msg) return
+        if (msg.type === 'LOCAL_GROUPS_RESULT') {
+          const hasGroup = group.id
+            ? msg.groups.some((g: TemplateGroup) => g.id === group.id) ||
+              msg.groups.some((g: TemplateGroup) => g.name === group.name)
+            : msg.groups.some((g: TemplateGroup) => g.name === group.name)
+          if (!hasGroup) return
+          window.removeEventListener('message', handler)
+          resolve()
+        } else if (msg.type === 'ERROR' && msg.code === 'LOCAL_GROUP_SAVE_FAILED') {
+          window.removeEventListener('message', handler)
+          reject(new Error(msg.message ?? 'Failed to import group'))
+        }
+      }
+      window.addEventListener('message', handler)
+      sendMessage({ type: 'SAVE_LOCAL_GROUP', group })
+    })
+  }
+
   return (
     <div style={styles.container}>
       {/* Header */}
       <div style={styles.header}>
-        <span style={styles.title}>Templates</span>
-        <div style={styles.headerActions}>
-          <button style={styles.secondaryBtn} onClick={handleImportClick}>
-            Import JSON
+        <div style={styles.headerLeft}>
+          <span style={styles.title}>Templates</span>
+          <button style={styles.modeBadge} onClick={onToggleMode}>
+            {isLocalMode ? 'Local' : 'Team'}
           </button>
+        </div>
+        <div style={styles.headerActions}>
+          <div ref={settingsRef} style={{ position: 'relative' }}>
+            <button
+              style={styles.secondaryBtn}
+              onClick={() => setSettingsOpen(v => !v)}
+              title="Settings"
+            >
+              Settings
+            </button>
+            {settingsOpen && (
+              <div style={styles.settingsMenu}>
+                <button
+                  style={styles.menuItem}
+                  onClick={() => { setSettingsOpen(false); handleImportClick() }}
+                >
+                  Import JSON
+                </button>
+                <button
+                  style={styles.menuItem}
+                  onClick={() => { setSettingsOpen(false); handleExportAll() }}
+                >
+                  Export JSON
+                </button>
+                {currentUser && (
+                  <button
+                    style={styles.menuItem}
+                    onClick={() => { setSettingsOpen(false); onLogout() }}
+                  >
+                    Log out
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
           <button style={styles.newBtn} onClick={onNewTemplate}>+ New</button>
         </div>
       </div>
@@ -167,12 +307,10 @@ export function TemplateList({
               template={t}
               currentUser={currentUser}
               isLocalMode={isLocalMode}
-              groups={groups}
               groupBadge={isSearchActive ? (groups.find(g => g.id === t.groupId)?.name ?? null) : null}
               onApply={() => onApply(t)}
+              onEdit={() => onEdit(t)}
               onDelete={() => handleDelete(t.id)}
-              onRename={(name) => handleRename(t.id, name)}
-              onMoveToGroup={(groupId) => onMoveToGroup(t.id, groupId)}
             />
           ))
         )}
@@ -244,18 +382,36 @@ const styles: Record<string, h.JSX.CSSProperties> = {
     padding: '12px 16px',
     borderBottom: '1px solid var(--figma-color-border)'
   },
+  headerLeft: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    flex: '0 0 auto',
+    whiteSpace: 'nowrap'
+  },
   headerActions: {
     display: 'flex',
     alignItems: 'center',
     gap: '6px',
-    flexWrap: 'wrap'
+    flexWrap: 'wrap',
+    flexShrink: 0
   },
   title: {
     fontSize: '13px',
     fontWeight: 600,
-    color: 'var(--figma-color-text)',
-    flex: 1,
-    minWidth: 0
+    color: 'var(--figma-color-text)'
+  },
+  modeBadge: {
+    padding: '2px 8px',
+    borderRadius: '10px',
+    border: '1px solid var(--figma-color-border)',
+    backgroundColor: 'var(--figma-color-bg-secondary)',
+    color: 'var(--figma-color-text-secondary)',
+    fontSize: '10px',
+    fontWeight: 500,
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+    lineHeight: '14px'
   },
   newBtn: {
     padding: '5px 10px',
@@ -276,6 +432,30 @@ const styles: Record<string, h.JSX.CSSProperties> = {
     fontSize: '11px',
     fontWeight: 500,
     cursor: 'pointer'
+  },
+  settingsMenu: {
+    position: 'absolute',
+    right: 0,
+    top: 'calc(100% + 4px)',
+    zIndex: 100,
+    backgroundColor: 'var(--figma-color-bg)',
+    border: '1px solid var(--figma-color-border)',
+    borderRadius: '6px',
+    boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+    minWidth: '140px',
+    paddingTop: '4px',
+    paddingBottom: '4px'
+  },
+  menuItem: {
+    display: 'block',
+    width: '100%',
+    padding: '6px 10px',
+    border: 'none',
+    background: 'none',
+    cursor: 'pointer',
+    textAlign: 'left' as const,
+    fontSize: '11px',
+    color: 'var(--figma-color-text)'
   },
   searchRow: {
     padding: '10px 16px 6px'

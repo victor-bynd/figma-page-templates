@@ -1,15 +1,33 @@
 import type { TextLayerOverride } from '@shared/types'
+import { isCoverPageName } from '@shared/coverPage'
 
 /**
- * Creates a new "Cover" page at index 0, or returns the existing one.
+ * Resolves the file's cover page.
+ * - If `preferredName` is provided, uses an exact case-insensitive match.
+ * - Otherwise, uses the first page named "Cover" or "Thumbnail".
+ * - If no page matches, creates one at index 0.
  */
-export function createCoverPage(): PageNode {
-    const existing = figma.root.children.find(p => p.name === 'Cover')
-    if (existing) return existing
+export function createCoverPage(preferredName?: string | null): PageNode {
+    const normalizedPreferred = preferredName?.trim().toLowerCase() ?? ''
+
+    if (normalizedPreferred) {
+        const preferred = figma.root.children.find(
+            p => p.name.trim().toLowerCase() === normalizedPreferred
+        )
+        if (preferred) return preferred
+    } else {
+        const existing = figma.root.children.find(p => isCoverPageName(p.name))
+        if (existing) return existing
+    }
 
     const page = figma.createPage()
-    page.name = 'Cover'
-    figma.root.insertChild(0, page)
+    page.name = preferredName?.trim() || 'Cover'
+
+    if (typeof figma.root.insertChild === 'function') {
+        figma.root.insertChild(0, page)
+    } else {
+        ;(figma.root.children as Array<PageNode>).unshift(page)
+    }
     return page
 }
 

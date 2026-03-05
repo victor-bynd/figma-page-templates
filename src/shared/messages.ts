@@ -11,6 +11,10 @@ export interface CaptureStructureMessage {
 export interface ApplyTemplateMessage {
   type: 'APPLY_TEMPLATE'
   pages: TemplatePage[]
+  /** When true, ensure/create and position the file Cover page. Default false. */
+  includeCover?: boolean
+  /** Preferred page name to use/create as the file cover page. */
+  coverPageName?: string | null
   /** When true, deletes all existing non-Cover pages before applying. Default false. */
   replaceAll?: boolean
   /**
@@ -24,6 +28,8 @@ export interface ApplyTemplateMessage {
 export interface PlaceCoverMessage {
   type: 'PLACE_COVER'
   componentKey: string
+  /** Preferred page name to use/create as the file cover page. */
+  coverPageName?: string | null
 }
 
 export interface GetTextLayersMessage {
@@ -43,6 +49,10 @@ export interface CacheAuthTokenMessage {
   token: string
   /** Unix ms timestamp of when the token was fetched, for TTL checks. */
   cachedAt: number
+}
+
+export interface ClearAuthTokenMessage {
+  type: 'CLEAR_AUTH_TOKEN'
 }
 
 export interface CacheOAuthTokensMessage {
@@ -97,13 +107,19 @@ export interface UpdateLocalTemplateMessage {
   name: string
 }
 
+export interface UpdateLocalTemplateFullMessage {
+  type: 'UPDATE_LOCAL_TEMPLATE_FULL'
+  id: string
+  template: Omit<Template, 'id' | 'createdAt' | 'updatedAt' | 'createdBy' | 'createdByEmail'>
+}
+
 export interface GetLocalGroupsMessage {
   type: 'GET_LOCAL_GROUPS'
 }
 
 export interface SaveLocalGroupMessage {
   type: 'SAVE_LOCAL_GROUP'
-  group: Omit<TemplateGroup, 'id' | 'createdAt' | 'updatedAt'>
+  group: Omit<TemplateGroup, 'id' | 'createdAt' | 'updatedAt'> & { id?: string }
 }
 
 export interface UpdateLocalGroupMessage {
@@ -147,6 +163,7 @@ export type PluginMessage =
   | GetTextLayersMessage
   | SetOverridesMessage
   | CacheAuthTokenMessage
+  | ClearAuthTokenMessage
   | CacheOAuthTokensMessage
   | CacheRefreshTokenMessage
   | ClearRefreshTokenMessage
@@ -157,6 +174,7 @@ export type PluginMessage =
   | SaveLocalTemplateMessage
   | DeleteLocalTemplateMessage
   | UpdateLocalTemplateMessage
+  | UpdateLocalTemplateFullMessage
   | GetLocalGroupsMessage
   | SaveLocalGroupMessage
   | UpdateLocalGroupMessage

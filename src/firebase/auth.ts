@@ -258,3 +258,12 @@ function cacheToken(token: string, cachedAt: number): void {
 export function cacheTokenLocal(token: string, cachedAt: number): void {
   cacheToken(token, cachedAt)
 }
+
+export function clearCachedTokenLocal(): void {
+  try {
+    localStorage.removeItem(TOKEN_KEY)
+    localStorage.removeItem(CACHED_AT_KEY)
+  } catch {
+    // Ignore storage failures
+  }
+}

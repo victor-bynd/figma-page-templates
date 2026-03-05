@@ -20,11 +20,19 @@ interface CoverSetupProps {
      * "connect" step is skipped and the component picker loads immediately.
      */
     preloadedLibrary?: { fileUrl: string; fileKey: string } | null
+    /** Optional preferred page name where the cover should be placed. */
+    coverPageName?: string | null
 }
 
 type Step = 'connect' | 'pick' | 'fields'
 
-export function CoverSetup({ onComponentSelected, onSkip, onBack, preloadedLibrary }: CoverSetupProps) {
+export function CoverSetup({
+    onComponentSelected,
+    onSkip,
+    onBack,
+    preloadedLibrary,
+    coverPageName
+}: CoverSetupProps) {
     // If a library was pre-configured in the template, start at pick.
     const [step, setStep] = useState<Step>(preloadedLibrary ? 'pick' : 'connect')
     const [fileUrl, setFileUrl] = useState(preloadedLibrary?.fileUrl ?? '')
@@ -260,7 +268,7 @@ export function CoverSetup({ onComponentSelected, onSkip, onBack, preloadedLibra
                     loading={loading}
                     onSelect={(key) => {
                         setUrlError(null)
-                        sendMessage({ type: 'PLACE_COVER', componentKey: key })
+                        sendMessage({ type: 'PLACE_COVER', componentKey: key, coverPageName })
                     }}
                 />
             </div>

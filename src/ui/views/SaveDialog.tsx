@@ -1,16 +1,18 @@
 import { h } from 'preact'
 import { useEffect, useRef, useState } from 'preact/hooks'
-import { saveTemplate } from '@backend/db'
+import { saveTemplate, updateTemplate } from '@backend/db'
 import { sendMessage } from '../App'
 import { parseFigmaFileKey } from '@shared/utils'
+import { resolveCoverPageIndex } from '@shared/coverPage'
 import { useFigmaLibrary } from '../hooks/useFigmaLibrary'
 import { ComponentPicker } from '../components/ComponentPicker'
-import type { CoverConfig, OrgUser, TemplatePage, TemplateGroup } from '@shared/types'
+import type { CoverConfig, OrgUser, Template, TemplatePage, TemplateGroup } from '@shared/types'
 
 interface SaveDialogProps {
   currentUser: OrgUser | null
   isLocalMode: boolean
   groups: TemplateGroup[]
+  editingTemplate?: Template | null
   onSaved: (templateId: string) => void
   onCancel: () => void
 }
@@ -30,17 +32,29 @@ export function SaveDialog({
   currentUser,
   isLocalMode,
   groups,
+  editingTemplate,
   onSaved,
   onCancel
 }: SaveDialogProps) {
+  const isEditing = !!editingTemplate
+  const isCreating = !isEditing
+  type CreationMode = 'detect' | 'manual'
   // ── Template metadata ───────────────────────────────────────────────────
-  const [name, setName] = useState('')
-  const [description, setDescription] = useState('')
+  const [name, setName] = useState(editingTemplate?.name ?? '')
+  const [description, setDescription] = useState(editingTemplate?.description ?? '')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [capturedPages, setCapturedPages] = useState<TemplatePage[] | null>(null)
+  const [capturedPages, setCapturedPages] = useState<TemplatePage[] | null>(
+    editingTemplate ? [...editingTemplate.pages.map(p => ({ ...p, sections: [...p.sections] }))] : null
+  )
+  const [creationMode, setCreationMode] = useState<CreationMode>('detect')
+  const [detectedPages, setDetectedPages] = useState<TemplatePage[] | null>(null)
+  const [manualPages, setManualPages] = useState<TemplatePage[] | null>(null)
 
-  const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null)
+  const [selectedGroupId, setSelectedGroupId] = useState<string | null>(editingTemplate?.groupId ?? null)
+  const [coverPageIndex, setCoverPageIndex] = useState<number | null>(() =>
+    editingTemplate ? resolveCoverPageIndex(editingTemplate.pages, editingTemplate.coverPageIndex) : null
+  )
 
   // ── Cover library (optional) ────────────────────────────────────────────
   const [coverPhase, setCoverPhase] = useState<CoverPhase>('idle')
@@ -49,7 +63,16 @@ export function SaveDialog({
   const [coverPat, setCoverPat] = useState('')
   const [coverPatLoaded, setCoverPatLoaded] = useState(false)
   const [coverUrlError, setCoverUrlError] = useState<string | null>(null)
-  const [selectedCover, setSelectedCover] = useState<SelectedCover | null>(null)
+  const [selectedCover, setSelectedCover] = useState<SelectedCover | null>(
+    editingTemplate?.coverConfig
+      ? {
+          key: editingTemplate.coverConfig.componentKey,
+          name: editingTemplate.coverConfig.componentKey,
+          fileUrl: editingTemplate.coverConfig.library.fileUrl,
+          fileKey: editingTemplate.coverConfig.library.fileKey
+        }
+      : null
+  )
 
   const { components: coverComponents, loading: coverLoading, error: coverLibError } = useFigmaLibrary(
     coverPhase !== 'idle' ? coverFileKey : null,
@@ -60,20 +83,24 @@ export function SaveDialog({
   const saveListenerRef = useRef<((e: MessageEvent) => void) | null>(null)
 
   function triggerCapture() {
-    setCapturedPages(null)
+    setDetectedPages(null)
     sendMessage({ type: 'CAPTURE_STRUCTURE' })
   }
 
-  // On mount: capture structure + request stored PAT.
+  // On mount: capture structure (new only) + request stored PAT.
   useEffect(() => {
-    triggerCapture()
+    if (!isEditing) triggerCapture()
     sendMessage({ type: 'GET_PAT' })
 
     const handleMessage = (event: MessageEvent) => {
       const msg = event.data?.pluginMessage
       if (!msg) return
       if (msg.type === 'STRUCTURE_CAPTURED') {
-        setCapturedPages(msg.pages)
+        if (isEditing) {
+          setCapturedPages(msg.pages)
+        } else {
+          setDetectedPages(msg.pages)
+        }
       } else if (msg.type === 'PAT_RESULT') {
         if (msg.pat) setCoverPat(msg.pat)
         setCoverPatLoaded(true)
@@ -96,6 +123,16 @@ export function SaveDialog({
       setCoverPhase('pick')
     }
   }, [coverComponents, coverLoading, coverPhase])
+
+  // Seed manual pages from detected structure the first time manual mode is used.
+  useEffect(() => {
+    if (!isCreating) return
+    if (creationMode !== 'manual') return
+    if (manualPages !== null) return
+    if (detectedPages === null) return
+    const seeded = detectedPages.map(p => ({ ...p, sections: [...p.sections] }))
+    setManualPages(seeded)
+  }, [creationMode, detectedPages, isCreating, manualPages])
 
   // ── Cover library handlers ───────────────────────────────────────────────
   function handleLoadCoverLibrary() {
@@ -125,6 +162,137 @@ export function SaveDialog({
     setCoverPhase('idle')
   }
 
+  // ── Page editing helpers (edit mode) ────────────────────────────────────
+  const [expandedPageIndex, setExpandedPageIndex] = useState<number | null>(null)
+  const isManualCreation = isCreating && creationMode === 'manual'
+  const isEditable = isEditing || isManualCreation
+  const activePages = isEditing ? capturedPages : isManualCreation ? manualPages : detectedPages
+
+  useEffect(() => {
+    if (activePages === null) {
+      setCoverPageIndex(null)
+      return
+    }
+    setCoverPageIndex(prev => resolveCoverPageIndex(activePages, prev))
+  }, [activePages])
+
+  function updateEditablePages(
+    updater: (prev: TemplatePage[] | null) => TemplatePage[] | null
+  ) {
+    if (isEditing) {
+      setCapturedPages(updater)
+    } else {
+      setManualPages(updater)
+    }
+  }
+
+  function handleRenamePage(index: number, newName: string) {
+    updateEditablePages(prev => {
+      if (!prev) return prev
+      const next = [...prev]
+      next[index] = { ...next[index], name: newName }
+      return next
+    })
+  }
+
+  function handleRemovePage(index: number) {
+    updateEditablePages(prev => {
+      if (!prev) return prev
+      const next = prev.filter((_, i) => i !== index)
+      return next
+    })
+    if (expandedPageIndex === index) setExpandedPageIndex(null)
+    else if (expandedPageIndex !== null && expandedPageIndex > index) setExpandedPageIndex(expandedPageIndex - 1)
+    setCoverPageIndex(prev => {
+      if (prev === null) return prev
+      if (prev === index) return null
+      if (prev > index) return prev - 1
+      return prev
+    })
+  }
+
+  function handleMovePage(index: number, direction: -1 | 1) {
+    const target = index + direction
+    if (!activePages || target < 0 || target >= activePages.length) return
+
+    updateEditablePages(prev => {
+      if (!prev) return prev
+      const next = [...prev]
+      const temp = next[index]
+      next[index] = next[target]
+      next[target] = temp
+      return next
+    })
+    if (expandedPageIndex === index) setExpandedPageIndex(index + direction)
+    else if (expandedPageIndex === index + direction) setExpandedPageIndex(index)
+    setCoverPageIndex(prev => {
+      if (prev === null) return prev
+      if (prev === index) return target
+      if (prev === target) return index
+      return prev
+    })
+  }
+
+  function handleAddPage() {
+    updateEditablePages(prev => {
+      const next = prev ? [...prev] : []
+      next.push({ name: `Page ${next.length + 1}`, sections: [] })
+      return next
+    })
+  }
+
+  function handleAddSeparator() {
+    updateEditablePages(prev => {
+      const next = prev ? [...prev] : []
+      next.push({ name: '---', sections: [] })
+      return next
+    })
+  }
+
+  function handleRenameSection(pageIndex: number, sectionIndex: number, newName: string) {
+    updateEditablePages(prev => {
+      if (!prev) return prev
+      const next = [...prev]
+      const sections = [...next[pageIndex].sections]
+      sections[sectionIndex] = { ...sections[sectionIndex], name: newName }
+      next[pageIndex] = { ...next[pageIndex], sections }
+      return next
+    })
+  }
+
+  function handleRemoveSection(pageIndex: number, sectionIndex: number) {
+    updateEditablePages(prev => {
+      if (!prev) return prev
+      const next = [...prev]
+      next[pageIndex] = {
+        ...next[pageIndex],
+        sections: next[pageIndex].sections.filter((_, i) => i !== sectionIndex)
+      }
+      return next
+    })
+  }
+
+  function handleAddSection(pageIndex: number) {
+    updateEditablePages(prev => {
+      if (!prev) return prev
+      const next = [...prev]
+      const sections = [...next[pageIndex].sections]
+      sections.push({ name: `Section ${sections.length + 1}`, x: 0, y: 0, width: 1440, height: 900 })
+      next[pageIndex] = { ...next[pageIndex], sections }
+      return next
+    })
+  }
+
+  function handleRefreshFromFile() {
+    if (isEditing) {
+      setCapturedPages(null)
+    } else {
+      setManualPages(null)
+      setDetectedPages(null)
+    }
+    sendMessage({ type: 'CAPTURE_STRUCTURE' })
+  }
+
   // ── Save ────────────────────────────────────────────────────────────────
   const coverConfig: CoverConfig | null = selectedCover
     ? { componentKey: selectedCover.key, library: { fileUrl: selectedCover.fileUrl, fileKey: selectedCover.fileKey } }
@@ -132,9 +300,18 @@ export function SaveDialog({
 
   async function handleSubmit(e: Event) {
     e.preventDefault()
-    if (!capturedPages || !name.trim()) return
+    if (!activePages || !name.trim()) return
     setSaving(true)
     setError(null)
+
+    const templateData = {
+      name: name.trim(),
+      description: description.trim(),
+      pages: activePages,
+      coverPageIndex,
+      coverConfig,
+      groupId: selectedGroupId
+    }
 
     if (isLocalMode) {
       if (saveListenerRef.current) {
@@ -169,45 +346,52 @@ export function SaveDialog({
 
       saveListenerRef.current = handleResponse
       window.addEventListener('message', handleResponse)
-      sendMessage({
-        type: 'SAVE_LOCAL_TEMPLATE',
-        template: {
-          name: name.trim(),
-          description: description.trim(),
-          pages: capturedPages,
-          coverConfig,
-          groupId: selectedGroupId,
-          createdBy: 'local',
-          createdByEmail: ''
-        }
-      })
+
+      if (isEditing) {
+        sendMessage({
+          type: 'UPDATE_LOCAL_TEMPLATE_FULL',
+          id: editingTemplate!.id,
+          template: templateData
+        })
+      } else {
+        sendMessage({
+          type: 'SAVE_LOCAL_TEMPLATE',
+          template: {
+            ...templateData,
+            createdBy: 'local',
+            createdByEmail: ''
+          }
+        })
+      }
       return
     }
 
     try {
-      const id = await saveTemplate(currentUser!.orgId, {
-        name: name.trim(),
-        description: description.trim(),
-        pages: capturedPages,
-        coverConfig,
-        groupId: selectedGroupId,
-        createdBy: currentUser!.uid,
-        createdByEmail: currentUser!.email
-      })
-      onSaved(id)
+      if (isEditing) {
+        await updateTemplate(currentUser!.orgId, editingTemplate!.id, templateData)
+        onSaved(editingTemplate!.id)
+      } else {
+        const id = await saveTemplate(currentUser!.orgId, {
+          ...templateData,
+          createdBy: currentUser!.uid,
+          createdByEmail: currentUser!.email
+        })
+        onSaved(id)
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save template')
       setSaving(false)
     }
   }
 
-  const canSubmit = name.trim().length > 0 && capturedPages !== null && !saving
+  const canSubmit = name.trim().length > 0 && activePages !== null && !saving
+  const structureLabel = isEditable ? 'Pages' : 'Detected structure'
 
   return (
     <div style={styles.container}>
       {/* Header */}
       <div style={styles.header}>
-        <span style={styles.title}>New Template</span>
+        <span style={styles.title}>{isEditing ? 'Edit Template' : 'New Template'}</span>
         <button style={styles.closeBtn} onClick={onCancel} aria-label="Cancel">
           ✕
         </button>
@@ -240,10 +424,52 @@ export function SaveDialog({
             rows={2}
           />
 
-          {/* Structure preview */}
+          {/* Structure preview / editor */}
+          {isCreating && (
+            <div style={styles.modeRow}>
+              <span style={styles.label}>Mode</span>
+              <div style={styles.modeToggle}>
+                <button
+                  type="button"
+                  style={{
+                    ...styles.modeBtn,
+                    ...(creationMode === 'detect' ? styles.modeBtnActive : {})
+                  }}
+                  onClick={() => setCreationMode('detect')}
+                  disabled={saving}
+                >
+                  Detect current structure
+                </button>
+                <button
+                  type="button"
+                  style={{
+                    ...styles.modeBtn,
+                    ...(creationMode === 'manual' ? styles.modeBtnActive : {})
+                  }}
+                  onClick={() => setCreationMode('manual')}
+                  disabled={saving}
+                >
+                  Manual mode
+                </button>
+              </div>
+              {creationMode === 'manual' && (
+                <div style={styles.modeHint}>Tip: name a page <span style={styles.hintMono}>---</span> to add a separator.</div>
+              )}
+            </div>
+          )}
           <div style={styles.previewHeader}>
-            <span style={styles.label}>Detected structure</span>
-            {capturedPages === null ? (
+            <span style={styles.label}>{structureLabel}</span>
+            {isEditable ? (
+              <button
+                type="button"
+                style={styles.refreshBtn}
+                onClick={handleRefreshFromFile}
+                disabled={saving}
+                title="Replace pages with current file structure"
+              >
+                ↺ Replace from file
+              </button>
+            ) : activePages === null ? (
               <span style={styles.scanning}>Scanning…</span>
             ) : (
               <button
@@ -257,24 +483,155 @@ export function SaveDialog({
               </button>
             )}
           </div>
+          {activePages !== null && activePages.length > 0 && (
+            <div style={styles.coverHint}>
+              {coverPageIndex !== null && activePages[coverPageIndex]
+                ? `Cover page: ${activePages[coverPageIndex].name}`
+                : 'Cover page: not set'}
+              {' · '}
+              Auto-detect uses the first page named "Cover" or "Thumbnail".
+            </div>
+          )}
 
           <div style={styles.preview}>
-            {capturedPages === null ? (
+            {activePages === null ? (
               <SkeletonList />
-            ) : capturedPages.length === 0 ? (
-              <p style={styles.emptyPreview}>No pages found in this file.</p>
+            ) : activePages.length === 0 ? (
+              <p style={styles.emptyPreview}>
+                {isEditable ? 'No pages. Add one below.' : 'No pages found in this file.'}
+              </p>
+            ) : isEditable ? (
+              activePages.map((page, pi) => (
+                <div key={pi}>
+                  <div style={styles.editablePageRow}>
+                    <button
+                      type="button"
+                      style={styles.expandBtn}
+                      onClick={() => setExpandedPageIndex(expandedPageIndex === pi ? null : pi)}
+                      title={expandedPageIndex === pi ? 'Collapse sections' : 'Expand sections'}
+                    >
+                      {expandedPageIndex === pi ? '▾' : '▸'}
+                    </button>
+                    <input
+                      style={styles.pageNameInput}
+                      value={page.name}
+                      onInput={e => handleRenamePage(pi, (e.target as HTMLInputElement).value)}
+                      disabled={saving}
+                    />
+                    <span style={styles.sectionCount}>
+                      {page.sections.length} frame{page.sections.length !== 1 ? 's' : ''}
+                    </span>
+                    <button
+                      type="button"
+                      style={coverPageIndex === pi ? styles.coverPageBtnActive : styles.coverPageBtn}
+                      onClick={() => setCoverPageIndex(pi)}
+                      disabled={saving}
+                      title="Set as cover page"
+                    >
+                      {coverPageIndex === pi ? 'Cover' : 'Set cover'}
+                    </button>
+                    <button
+                      type="button"
+                      style={styles.moveBtn}
+                      onClick={() => handleMovePage(pi, -1)}
+                      disabled={saving || pi === 0}
+                      title="Move up"
+                    >↑</button>
+                    <button
+                      type="button"
+                      style={styles.moveBtn}
+                      onClick={() => handleMovePage(pi, 1)}
+                      disabled={saving || pi === activePages!.length - 1}
+                      title="Move down"
+                    >↓</button>
+                    <button
+                      type="button"
+                      style={styles.removeBtn}
+                      onClick={() => handleRemovePage(pi)}
+                      disabled={saving}
+                      title="Remove page"
+                    >✕</button>
+                  </div>
+                  {expandedPageIndex === pi && (
+                    <div style={styles.sectionsContainer}>
+                      {page.sections.length === 0 ? (
+                        <p style={styles.emptySections}>No frames</p>
+                      ) : (
+                        page.sections.map((sec, si) => (
+                          <div key={si} style={styles.sectionRow}>
+                            <span style={styles.sectionIcon}>▫</span>
+                            <input
+                              style={styles.sectionNameInput}
+                              value={sec.name}
+                              onInput={e => handleRenameSection(pi, si, (e.target as HTMLInputElement).value)}
+                              disabled={saving}
+                            />
+                            <button
+                              type="button"
+                              style={styles.removeBtn}
+                              onClick={() => handleRemoveSection(pi, si)}
+                              disabled={saving}
+                              title="Remove frame"
+                            >✕</button>
+                          </div>
+                        ))
+                      )}
+                      <button
+                        type="button"
+                        style={styles.addSectionBtn}
+                        onClick={() => handleAddSection(pi)}
+                        disabled={saving}
+                      >
+                        + Add frame
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))
             ) : (
-              capturedPages.map(page => (
-                <div key={page.name} style={styles.pageRow}>
+              activePages.map((page, index) => (
+                <div key={`${page.name}-${index}`} style={styles.pageRow}>
                   <span style={styles.pageIcon}>▤</span>
                   <span style={styles.pageName}>{page.name}</span>
                   <span style={styles.sectionCount}>
                     {page.sections.length} frame{page.sections.length !== 1 ? 's' : ''}
                   </span>
+                  <button
+                    type="button"
+                    style={coverPageIndex === index ? styles.coverPageBtnActive : styles.coverPageBtn}
+                    onClick={() => setCoverPageIndex(index)}
+                    disabled={saving}
+                    title="Set as cover page"
+                  >
+                    {coverPageIndex === index ? 'Cover' : 'Set cover'}
+                  </button>
                 </div>
               ))
             )}
           </div>
+
+          {isEditable && (
+            <div style={styles.addPageRow}>
+              <button
+                type="button"
+                style={styles.addPageBtn}
+                onClick={handleAddPage}
+                disabled={saving}
+              >
+                + Add page
+              </button>
+              {isManualCreation && (
+                <button
+                  type="button"
+                  style={styles.addSeparatorBtn}
+                  onClick={handleAddSeparator}
+                  disabled={saving}
+                >
+                  + Add separator
+                </button>
+              )}
+            </div>
+          )}
 
           {/* Group (optional) */}
           {groups.length > 0 && (
@@ -434,7 +791,7 @@ export function SaveDialog({
               }}
               disabled={!canSubmit}
             >
-              {saving ? 'Saving…' : 'Save Template'}
+              {saving ? 'Saving…' : isEditing ? 'Update Template' : 'Save Template'}
             </button>
           </div>
         </div>
@@ -498,6 +855,39 @@ const styles: Record<string, h.JSX.CSSProperties> = {
     color: 'var(--figma-color-text-secondary)',
     marginBottom: '4px',
     display: 'block'
+  },
+  modeRow: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '6px',
+    marginTop: '16px'
+  },
+  modeToggle: {
+    display: 'flex',
+    gap: '6px',
+    flexWrap: 'wrap'
+  },
+  modeBtn: {
+    padding: '6px 8px',
+    borderRadius: '6px',
+    border: '1px solid var(--figma-color-border)',
+    backgroundColor: 'var(--figma-color-bg)',
+    color: 'var(--figma-color-text-secondary)',
+    fontSize: '11px',
+    cursor: 'pointer'
+  },
+  modeBtnActive: {
+    backgroundColor: 'var(--figma-color-bg-brand)',
+    color: 'var(--figma-color-text-onbrand)',
+    borderColor: 'var(--figma-color-bg-brand)'
+  },
+  modeHint: {
+    fontSize: '10px',
+    color: 'var(--figma-color-text-secondary)'
+  },
+  hintMono: {
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+    fontSize: '10px'
   },
   required: {
     color: 'var(--figma-color-text-danger)'
@@ -574,6 +964,31 @@ const styles: Record<string, h.JSX.CSSProperties> = {
     color: 'var(--figma-color-text-secondary)',
     flexShrink: 0
   },
+  coverHint: {
+    fontSize: '10px',
+    color: 'var(--figma-color-text-secondary)',
+    marginBottom: '6px'
+  },
+  coverPageBtn: {
+    padding: '2px 6px',
+    borderRadius: '10px',
+    border: '1px solid var(--figma-color-border)',
+    backgroundColor: 'var(--figma-color-bg)',
+    color: 'var(--figma-color-text-secondary)',
+    fontSize: '10px',
+    cursor: 'pointer',
+    flexShrink: 0
+  },
+  coverPageBtnActive: {
+    padding: '2px 6px',
+    borderRadius: '10px',
+    border: '1px solid var(--figma-color-bg-brand)',
+    backgroundColor: 'var(--figma-color-bg-brand)',
+    color: 'var(--figma-color-text-onbrand)',
+    fontSize: '10px',
+    cursor: 'pointer',
+    flexShrink: 0
+  },
   emptyPreview: {
     fontSize: '11px',
     color: 'var(--figma-color-text-secondary)',
@@ -587,6 +1002,129 @@ const styles: Record<string, h.JSX.CSSProperties> = {
     backgroundColor: 'var(--figma-color-border)',
     marginBottom: '8px',
     opacity: 0.5
+  },
+  // Editable page rows (edit mode)
+  editablePageRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px',
+    padding: '3px 0',
+    fontSize: '12px',
+    color: 'var(--figma-color-text)'
+  },
+  expandBtn: {
+    background: 'none',
+    border: 'none',
+    cursor: 'pointer',
+    color: 'var(--figma-color-text-secondary)',
+    fontSize: '10px',
+    padding: '0 2px',
+    flexShrink: 0,
+    width: '16px',
+    textAlign: 'center' as const
+  },
+  pageNameInput: {
+    flex: 1,
+    minWidth: 0,
+    padding: '3px 6px',
+    borderRadius: '4px',
+    border: '1px solid var(--figma-color-border)',
+    backgroundColor: 'var(--figma-color-bg)',
+    color: 'var(--figma-color-text)',
+    fontSize: '12px',
+    fontWeight: 600,
+    boxSizing: 'border-box'
+  },
+  moveBtn: {
+    background: 'none',
+    border: 'none',
+    cursor: 'pointer',
+    color: 'var(--figma-color-text-secondary)',
+    fontSize: '11px',
+    padding: '2px 3px',
+    borderRadius: '3px',
+    flexShrink: 0,
+    opacity: 0.7
+  },
+  removeBtn: {
+    background: 'none',
+    border: 'none',
+    cursor: 'pointer',
+    color: 'var(--figma-color-text-danger)',
+    fontSize: '10px',
+    padding: '2px 3px',
+    borderRadius: '3px',
+    flexShrink: 0
+  },
+  addPageBtn: {
+    flex: 1,
+    padding: '5px',
+    borderRadius: '6px',
+    border: '1px dashed var(--figma-color-border)',
+    backgroundColor: 'transparent',
+    color: 'var(--figma-color-text-secondary)',
+    fontSize: '11px',
+    cursor: 'pointer',
+    textAlign: 'center'
+  },
+  addPageRow: {
+    display: 'flex',
+    gap: '6px',
+    marginTop: '4px'
+  },
+  addSeparatorBtn: {
+    padding: '5px 8px',
+    borderRadius: '6px',
+    border: '1px dashed var(--figma-color-border)',
+    backgroundColor: 'transparent',
+    color: 'var(--figma-color-text-secondary)',
+    fontSize: '11px',
+    cursor: 'pointer',
+    textAlign: 'center'
+  },
+  sectionsContainer: {
+    marginLeft: '20px',
+    paddingLeft: '8px',
+    borderLeft: '1px solid var(--figma-color-border)',
+    marginBottom: '4px'
+  },
+  sectionRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px',
+    padding: '2px 0',
+    fontSize: '11px'
+  },
+  sectionIcon: {
+    color: 'var(--figma-color-text-secondary)',
+    fontSize: '10px',
+    flexShrink: 0
+  },
+  sectionNameInput: {
+    flex: 1,
+    minWidth: 0,
+    padding: '2px 5px',
+    borderRadius: '3px',
+    border: '1px solid var(--figma-color-border)',
+    backgroundColor: 'var(--figma-color-bg)',
+    color: 'var(--figma-color-text)',
+    fontSize: '11px',
+    boxSizing: 'border-box'
+  },
+  emptySections: {
+    fontSize: '10px',
+    color: 'var(--figma-color-text-secondary)',
+    margin: '2px 0',
+    fontStyle: 'italic'
+  },
+  addSectionBtn: {
+    background: 'none',
+    border: 'none',
+    cursor: 'pointer',
+    color: 'var(--figma-color-text-secondary)',
+    fontSize: '10px',
+    padding: '3px 0',
+    textAlign: 'left' as const
   },
   // Cover section
   coverSection: {

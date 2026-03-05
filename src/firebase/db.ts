@@ -181,6 +181,21 @@ export async function moveTemplateToGroupFirestore(
 }
 
 /**
+ * Updates all mutable fields of a template document.
+ */
+export async function updateTemplate(
+  orgId: string,
+  templateId: string,
+  data: Omit<Template, 'id' | 'createdAt' | 'updatedAt' | 'createdBy' | 'createdByEmail'>
+): Promise<void> {
+  const db = getDb()
+  await updateDoc(doc(db, 'orgs', orgId, 'templates', templateId), {
+    ...data,
+    updatedAt: serverTimestamp()
+  })
+}
+
+/**
  * Updates the name of a template document.
  */
 export async function updateTemplateName(

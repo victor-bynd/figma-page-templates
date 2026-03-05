@@ -1,4 +1,5 @@
 import type { TemplatePage } from '@shared/types'
+import { isCoverPageName } from '@shared/coverPage'
 import { createCoverPage } from './cover'
 
 /**
@@ -6,17 +7,24 @@ import { createCoverPage } from './cover'
  *
  * - Pages that already exist in the file are skipped (not overwritten),
  *   unless `options.replaceAll` is true.
- * - The "Cover" page is ensured to exist, but its contents are managed by the cover flow.
+ * - The cover page is only ensured when `options.includeCover` is true.
  * - For each page, all template sections are created as FrameNodes.
- * - When `replaceAll` is true: existing non-Cover pages are recorded first,
+ * - When `replaceAll` is true: existing non-cover pages are recorded first,
  *   then removed AFTER the new pages are created (avoids the Figma constraint
  *   of requiring at least one page in a file at all times).
  */
 export function applyTemplate(
   pages: TemplatePage[],
-  options: { replaceAll?: boolean; coverInsertIndex?: number | null } = {}
+  options: {
+    includeCover?: boolean
+    replaceAll?: boolean
+    coverInsertIndex?: number | null
+    coverPageName?: string | null
+  } = {}
 ): void {
-  const coverPage = createCoverPage()
+  const includeCover = options.includeCover === true
+  const coverPage = includeCover ? createCoverPage(options.coverPageName) : null
+  const failedRemovalNames = new Map<PageNode, string>()
 
   // Snapshot the pages that exist BEFORE we start, so we only reuse truly
   // pre-existing pages — not pages we create during this apply run.
@@ -30,14 +38,14 @@ export function applyTemplate(
   }
 
   // When replaceAll: navigate away from the current page first (Figma forbids
-  // removing the active page), then delete all non-Cover pages.
+  // removing the active page), then delete all non-cover pages.
   if (options.replaceAll) {
     // We'll create new pages before deleting — navigate to a safe landing spot.
     // For now just clear the pre-existing map so nothing is reused.
     preExisting.clear()
 
     const pagesToRemove = figma.root.children.filter(
-      (p): p is PageNode => p.name !== 'Cover'
+      (p): p is PageNode => p !== coverPage
     ) as PageNode[]
 
     // Create a temporary landing page so we can navigate away before deleting.
@@ -47,7 +55,20 @@ export function applyTemplate(
     figma.currentPage = coverPage ?? tempPage
 
     for (const page of pagesToRemove) {
-      if (figma.root.children.length > 1) page.remove()
+      if (figma.root.children.length > 1) {
+        try {
+          page.remove()
+        } catch {
+          // Figma may forbid removing certain pages (e.g. the active page
+          // in another tab, or a system-protected node). Clear it instead
+          // so it becomes an empty shell, then rename to mark for cleanup.
+          for (const child of [...page.children]) {
+            try { child.remove() } catch { /* skip locked children */ }
+          }
+          failedRemovalNames.set(page, page.name)
+          page.name = '__removed__'
+        }
+      }
     }
   }
 
@@ -55,7 +76,7 @@ export function applyTemplate(
   const appliedPages: PageNode[] = []
 
   for (const templatePage of pages) {
-    if (templatePage.name === 'Cover') continue
+    if (includeCover && isTemplateCoverPage(templatePage.name, options.coverPageName)) continue
 
     let page: PageNode | undefined
 
@@ -90,18 +111,30 @@ export function applyTemplate(
     figma.currentPage = firstCreatedPage
   }
 
-  repositionCoverPage(coverPage, appliedPages, options.coverInsertIndex)
+  if (coverPage) {
+    repositionCoverPage(coverPage, appliedPages, options.coverInsertIndex)
+  }
 
-  // Clean up temp landing page if it still exists and is empty.
-  const temp = figma.root.children.find(p => p.name === '__temp__') as PageNode | undefined
-  if (temp) {
-    // Figma forbids removing the active page; hop away first.
-    if (figma.currentPage === temp) {
-      const landing = figma.root.children.find(p => p !== temp) as PageNode | undefined
+  // Clean up temp and leftover "__removed__" pages.
+  const cleanup = figma.root.children.filter(
+    p => p.name === '__temp__' || p.name === '__removed__'
+  ) as PageNode[]
+  for (const page of cleanup) {
+    if (figma.currentPage === page) {
+      const landing = figma.root.children.find(p => p !== page) as PageNode | undefined
       if (landing) figma.currentPage = landing
     }
-    if (temp.children.length === 0 && figma.root.children.length > 1) {
-      temp.remove()
+    if (figma.root.children.length > 1) {
+      try {
+        page.remove()
+      } catch {
+        // If a page can't be removed (active in another tab, protected, etc.),
+        // restore its original name so we don't leave "__removed__" behind.
+        const originalName = failedRemovalNames.get(page)
+        if (originalName) {
+          page.name = originalName
+        }
+      }
     }
   }
 }
@@ -132,4 +165,18 @@ function repositionCoverPage(
   if (currentIndex === targetIndex) return
 
   figma.root.insertChild(targetIndex, coverPage)
+}
+
+function isTemplateCoverPage(
+  templatePageName: string,
+  configuredCoverPageName?: string | null
+): boolean {
+  const normalizedPageName = templatePageName.trim().toLowerCase()
+  const normalizedConfigured = configuredCoverPageName?.trim().toLowerCase()
+
+  if (normalizedConfigured && normalizedPageName === normalizedConfigured) {
+    return true
+  }
+
+  return isCoverPageName(templatePageName)
 }

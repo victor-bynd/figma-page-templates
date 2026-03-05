@@ -2,7 +2,14 @@ import { render } from '@create-figma-plugin/ui'
 import { h } from 'preact'
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks'
 import { onAuthStateChanged } from 'firebase/auth'
-import { auth, cacheTokenLocal, getOrgIdFromClaims, restoreSessionFromRefreshToken } from '@backend/auth'
+import {
+  auth,
+  cacheTokenLocal,
+  clearCachedTokenLocal,
+  getOrgIdFromClaims,
+  restoreSessionFromRefreshToken,
+  signOutUser
+} from '@backend/auth'
 import { bootstrapOrg, upsertUser } from '@backend/db'
 import { AuthView } from './views/AuthView'
 import { SaveDialog } from './views/SaveDialog'
@@ -12,8 +19,9 @@ import { CoverSetup } from './views/CoverSetup'
 import type { ApplyStatus } from './views/ApplyConfirm'
 import type { PluginMessage, UIMessage } from '@shared/messages'
 import type { OrgUser, Template, TemplatePage } from '@shared/types'
+import { resolveCoverPageIndex } from '@shared/coverPage'
 import { ErrorBoundary } from './components/ErrorBoundary'
-import { ToastContainer } from './components/Toast'
+import { ToastContainer, pushToast } from './components/Toast'
 import { useMessages } from './hooks/useMessages'
 import { GroupsSidebar } from './components/GroupsSidebar'
 import { useGroups } from './hooks/useGroups'
@@ -59,6 +67,7 @@ function App() {
   const isLocalModeRef = useRef(false)
   const [capturedPages, setCapturedPages] = useState<TemplatePage[] | null>(null)
   const [selectedTemplate, setSelectedTemplate] = useState<Template | null>(null)
+  const [editingTemplate, setEditingTemplate] = useState<Template | null>(null)
   const [applyStatus, setApplyStatus] = useState<ApplyStatus>('idle')
   const [applyError, setApplyError] = useState<string | null>(null)
   const [selectedComponentKey, setSelectedComponentKey] = useState<string | null>(null)
@@ -66,6 +75,7 @@ function App() {
   const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT_WIDTH)
   const rehydratingRef = useRef(true)
   const rehydrationAttemptedRef = useRef(false)
+  const claimRefreshInFlightRef = useRef(false)
 
   const groupMode = isLocalMode ? 'local' : 'firestore'
   const groupOrgId = isLocalMode ? '' : (currentUser?.orgId ?? '')
@@ -310,46 +320,167 @@ function App() {
     isLocalModeRef.current = isLocalMode
   }, [isLocalMode])
 
+  // Guard against startup message races that can leave rehydration stuck forever.
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      if (!isLocalModeRef.current && rehydratingRef.current && !auth.currentUser) {
+        rehydratingRef.current = false
+        setCurrentUser(null)
+        setView('auth')
+      }
+    }, 3000)
+    return () => window.clearTimeout(timeoutId)
+  }, [])
+
   // Firebase auth state is the source of truth for sign-in status.
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async firebaseUser => {
-      // If the user entered local mode, don't let Firebase auth state override it.
-      if (isLocalModeRef.current) return
-      if (firebaseUser) {
-        const email = firebaseUser.email ?? ''
-        const domain = email.split('@')[1] ?? ''
-        const orgId = await getOrgIdFromClaims(firebaseUser)
-        const user: OrgUser = {
-          uid: firebaseUser.uid,
-          email,
-          orgId,
-          displayName: firebaseUser.displayName
-        }
+      try {
+        // If the user entered local mode, don't let Firebase auth state override it.
+        if (isLocalModeRef.current) return
+        if (firebaseUser) {
+          const tokenResult = await firebaseUser.getIdTokenResult()
+          const claimsOrgId = tokenResult.claims.orgId
+          if (!claimsOrgId && !claimRefreshInFlightRef.current && firebaseUser.refreshToken) {
+            // Missing orgId claim can break Firestore rules. Refresh via custom token bridge.
+            try {
+              claimRefreshInFlightRef.current = true
+              await restoreSessionFromRefreshToken(firebaseUser.refreshToken)
+              return
+            } catch (err) {
+              console.warn('[Auth] Claim refresh failed:', err)
+            } finally {
+              claimRefreshInFlightRef.current = false
+            }
+          }
+          const email = firebaseUser.email ?? ''
+          const domain = email.split('@')[1] ?? ''
+          const orgId = await getOrgIdFromClaims(firebaseUser)
+          const user: OrgUser = {
+            uid: firebaseUser.uid,
+            email,
+            orgId,
+            displayName: firebaseUser.displayName
+          }
 
-        await upsertUser(user)
-        await bootstrapOrg(orgId, domain)
-        const cachedAt = Date.now()
-        const token = await firebaseUser.getIdToken()
-        cacheTokenLocal(token, cachedAt)
-        sendMessage({ type: 'CACHE_AUTH_TOKEN', token, cachedAt })
+          // Non-blocking: keep auth/session usable even if bootstrap writes are denied.
+          try {
+            await upsertUser(user)
+            await bootstrapOrg(orgId, domain)
+          } catch (bootstrapErr) {
+            console.warn('[Auth] Bootstrap writes failed:', bootstrapErr)
+          }
+          const cachedAt = Date.now()
+          const token = await firebaseUser.getIdToken()
+          cacheTokenLocal(token, cachedAt)
+          sendMessage({ type: 'CACHE_AUTH_TOKEN', token, cachedAt })
 
-        // Persist the refresh token so the session survives plugin restarts.
-        if (firebaseUser.refreshToken) {
-          sendMessage({ type: 'CACHE_REFRESH_TOKEN', refreshToken: firebaseUser.refreshToken })
-        }
+          // Persist the refresh token so the session survives plugin restarts.
+          if (firebaseUser.refreshToken) {
+            sendMessage({ type: 'CACHE_REFRESH_TOKEN', refreshToken: firebaseUser.refreshToken })
+          }
 
-        setCurrentUser(user)
-        setView('template-list')
-      } else {
-        if (rehydratingRef.current) {
-          setView('loading')
-          return
+          setCurrentUser(user)
+          setView('template-list')
+        } else {
+          if (rehydratingRef.current) {
+            setView('loading')
+            return
+          }
+          setCurrentUser(null)
+          setView('auth')
         }
+      } catch (err) {
+        console.error('[Auth] onAuthStateChanged failed:', err)
+        rehydratingRef.current = false
         setCurrentUser(null)
         setView('auth')
       }
     })
     return () => unsubscribe()
+  }, [])
+
+  async function getFirestoreContext(): Promise<{ orgId: string; uid: string }> {
+    const user = auth.currentUser
+    if (!user) throw new Error('Not signed in.')
+
+    let tokenResult = await user.getIdTokenResult()
+    let orgId = tokenResult.claims.orgId
+
+    if (!orgId) {
+      if (!user.refreshToken) {
+        throw new Error('Missing orgId claim. Please sign out and sign in again.')
+      }
+      if (!claimRefreshInFlightRef.current) {
+        try {
+          claimRefreshInFlightRef.current = true
+          await restoreSessionFromRefreshToken(user.refreshToken)
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'Unknown error'
+          throw new Error(`Auth refresh failed: ${msg}`)
+        } finally {
+          claimRefreshInFlightRef.current = false
+        }
+      }
+      const refreshed = auth.currentUser
+      if (!refreshed) throw new Error('Auth refresh failed. Please sign in again.')
+      tokenResult = await refreshed.getIdTokenResult(true)
+      orgId = tokenResult.claims.orgId
+      if (!orgId) {
+        throw new Error('Missing orgId claim after refresh. Please sign out and sign in again.')
+      }
+      return { orgId: String(orgId), uid: refreshed.uid }
+    }
+
+    return { orgId: String(orgId), uid: user.uid }
+  }
+
+  const handleToggleMode = useCallback(() => {
+    if (isLocalMode) {
+      // Switching to team mode: check if Firebase session is still alive
+      const firebaseUser = auth.currentUser
+      if (firebaseUser) {
+        void (async () => {
+          const orgId = await getOrgIdFromClaims(firebaseUser)
+          const user: OrgUser = {
+            uid: firebaseUser.uid,
+            email: firebaseUser.email ?? '',
+            orgId,
+            displayName: firebaseUser.displayName
+          }
+          setCurrentUser(user)
+          setIsLocalMode(false)
+          setSelectedGroupId('all')
+        })()
+      } else {
+        // No cached Firebase session — navigate to auth.
+        // Reset isLocalMode so onAuthStateChanged can process after sign-in.
+        setIsLocalMode(false)
+        setView('auth')
+      }
+    } else {
+      // Switching to local mode: just flip the flag, keep Firebase session alive
+      setIsLocalMode(true)
+      setSelectedGroupId('all')
+    }
+  }, [isLocalMode])
+
+  const handleLogout = useCallback(async () => {
+    let signedOut = false
+    try {
+      await signOutUser()
+      signedOut = true
+    } catch (err) {
+      console.warn('[Auth] Sign out failed:', err)
+    } finally {
+      clearCachedTokenLocal()
+      sendMessage({ type: 'CLEAR_AUTH_TOKEN' })
+      sendMessage({ type: 'CLEAR_REFRESH_TOKEN' })
+      setCurrentUser(null)
+      if (!isLocalModeRef.current && (signedOut || !auth.currentUser)) {
+        setView('auth')
+      }
+    }
   }, [])
 
   let content: h.JSX.Element
@@ -375,10 +506,13 @@ function App() {
         currentUser={currentUser}
         isLocalMode={isLocalMode}
         groups={groups}
+        editingTemplate={editingTemplate}
         onSaved={(_id) => {
+          setEditingTemplate(null)
           setView('template-list')
         }}
         onCancel={() => {
+          setEditingTemplate(null)
           setView('template-list')
         }}
       />
@@ -403,9 +537,21 @@ function App() {
       />
     )
   } else if (view === 'cover-setup') {
+    const coverPageIndex = selectedTemplate
+      ? resolveCoverPageIndex(
+          selectedTemplate.pages,
+          selectedTemplate.coverPageIndex
+        )
+      : null
+    const coverPageName =
+      selectedTemplate && coverPageIndex !== null
+        ? (selectedTemplate.pages[coverPageIndex]?.name ?? null)
+        : null
+
     content = (
       <CoverSetup
         preloadedLibrary={selectedTemplate?.coverConfig?.library ?? null}
+        coverPageName={coverPageName}
         onComponentSelected={(componentKey) => {
           setSelectedComponentKey(componentKey)
           setView('template-list')
@@ -422,11 +568,18 @@ function App() {
   } else {
     // Group CRUD handlers
     const handleCreateGroup = async (name: string) => {
-      if (isLocalMode) {
-        const nextOrder = groups.length
-        sendMessage({ type: 'SAVE_LOCAL_GROUP', group: { name, order: nextOrder, createdBy: 'local' } })
-      } else {
-        await saveTemplateGroup(currentUser!.orgId, { name, order: groups.length, createdBy: currentUser!.uid })
+      try {
+        if (isLocalMode) {
+          const nextOrder = groups.length
+          sendMessage({ type: 'SAVE_LOCAL_GROUP', group: { name, order: nextOrder, createdBy: 'local' } })
+        } else {
+          const { orgId, uid } = await getFirestoreContext()
+          await saveTemplateGroup(orgId, { name, order: groups.length, createdBy: uid })
+        }
+      } catch (err) {
+        console.error('[App] Failed to create group:', err)
+        const detail = err instanceof Error ? err.message : ''
+        pushToast(`Failed to create group.${detail ? ' ' + detail : ' Please try again.'}`, 'error')
       }
     }
 
@@ -434,7 +587,8 @@ function App() {
       if (isLocalMode) {
         sendMessage({ type: 'UPDATE_LOCAL_GROUP', id, name })
       } else {
-        await updateTemplateGroup(currentUser!.orgId, id, name)
+        const { orgId } = await getFirestoreContext()
+        await updateTemplateGroup(orgId, id, name)
       }
     }
 
@@ -442,7 +596,8 @@ function App() {
       if (isLocalMode) {
         sendMessage({ type: 'DELETE_LOCAL_GROUP', id })
       } else {
-        await deleteTemplateGroup(currentUser!.orgId, id)
+        const { orgId } = await getFirestoreContext()
+        await deleteTemplateGroup(orgId, id)
       }
       // If the deleted group was selected, fall back to "all"
       if (selectedGroupId === id) setSelectedGroupId('all')
@@ -452,8 +607,9 @@ function App() {
       if (isLocalMode) {
         sendMessage({ type: 'REORDER_LOCAL_GROUPS', orderedIds })
       } else {
+        const { orgId } = await getFirestoreContext()
         await reorderTemplateGroups(
-          currentUser!.orgId,
+          orgId,
           orderedIds.map((id, order) => ({ id, order }))
         )
       }
@@ -463,7 +619,8 @@ function App() {
       if (isLocalMode) {
         sendMessage({ type: 'MOVE_TEMPLATE_TO_GROUP', templateId, groupId })
       } else {
-        await moveTemplateToGroupFirestore(currentUser!.orgId, templateId, groupId)
+        const { orgId } = await getFirestoreContext()
+        await moveTemplateToGroupFirestore(orgId, templateId, groupId)
       }
     }
 
@@ -528,6 +685,7 @@ function App() {
               filterGroupId={selectedGroupId}
               groups={groups}
               onNewTemplate={() => {
+                setEditingTemplate(null)
                 setCapturedPages(null)
                 setView('save-dialog')
               }}
@@ -539,7 +697,13 @@ function App() {
                 sendMessage({ type: 'CAPTURE_STRUCTURE' })
                 setView('apply-confirm')
               }}
-              onMoveToGroup={handleMoveTemplateToGroup}
+              onEdit={(template) => {
+                setEditingTemplate(template)
+                setCapturedPages(null)
+                setView('save-dialog')
+              }}
+              onToggleMode={handleToggleMode}
+              onLogout={handleLogout}
             />
           </div>
         </SortableContext>
